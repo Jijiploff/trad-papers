@@ -1,0 +1,55 @@
+# =============================================================================
+# Dependencias principales - Paper Translator
+# =============================================================================
+# Instalar con: pip install -r requirements.txt
+# Python 3.10+ recomendado
+
+# --- Framework web ---
+streamlit>=1.32.0,<2.0.0
+
+# --- Procesamiento de archivos ---
+# PDF
+pdfplumber>=0.10.0
+PyPDF2>=3.0.0
+
+# DOCX
+python-docx>=1.1.0
+
+# LaTeX
+# (no requiere paquetes adicionales para parsing básico)
+
+# --- Proveedores de traducción ---
+# Google Gemini (GRATIS - 1M tokens/día) - RECOMENDADO
+google-generativeai>=0.8.0
+
+# OpenAI
+openai>=1.12.0,<2.0.0
+
+# DeepL (Fallback automático - plan gratuito disponible)
+deepl>=1.17.0
+
+# --- Utilidades ---
+# Configuración YAML
+PyYAML>=6.0
+
+# Utilidades adicionales
+# (no se requieren paquetes adicionales para las funcionalidades base)
+
+# =============================================================================
+# Dependencias opcionales / para desarrollo
+# =============================================================================
+# Descomenta las siguientes líneas si necesitas funcionalidades avanzadas:
+
+# Análisis de costos y monitoreo
+# prometheus-client>=0.20.0
+
+# Tests
+# pytest>=8.0.0
+# pytest-cov>=4.1.0
+
+# Formateo de código
+# black>=24.0.0
+# flake8>=7.0.0
+
+# Documentación
+# mkdocs>=1.5.0
