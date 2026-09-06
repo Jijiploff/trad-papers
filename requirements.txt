@@ -15,6 +15,9 @@ PyPDF2>=3.0.0
 # DOCX
 python-docx>=1.1.0
 
+# PDF generado desde la traducción
+reportlab>=4.0.0
+
 # LaTeX
 # (no requiere paquetes adicionales para parsing básico)
 

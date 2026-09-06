@@ -42,7 +42,7 @@ DEFAULT_CONFIG = {
         },
         "gemini": {
             "api_key": "",
-            "model": "gemini-1.5-flash",
+            "model": "gemini-3.1-flash-lite",
             "temperature": 0.2,
         },
     },

@@ -15,6 +15,7 @@ import os
 import uuid
 import io
 import zipfile
+import threading
 from pathlib import Path
 from typing import List, Dict, Optional
 
@@ -98,6 +99,12 @@ def init_session_state():
         st.session_state.translated_docs: List[Document] = []
     if "exported_files" not in st.session_state:
         st.session_state.exported_files: Dict[str, Path] = {}
+    if "preprocessed_exports" not in st.session_state:
+        st.session_state.preprocessed_exports: Dict[str, List[Path]] = {}
+    if "preprocessing_approved" not in st.session_state:
+        st.session_state.preprocessing_approved = False
+    if "preprocessing_review_signature" not in st.session_state:
+        st.session_state.preprocessing_review_signature = None
     if "dark_mode" not in st.session_state:
         st.session_state.dark_mode = False  # Modo claro por defecto
 
@@ -255,6 +262,8 @@ def main():
 
         if new_docs:
             st.session_state.documents.extend(new_docs)
+            st.session_state.preprocessing_approved = False
+            st.session_state.preprocessing_review_signature = None
             st.success(f"✅ Se cargaron {len(new_docs)} archivos nuevos.")
             st.rerun()
 
@@ -297,19 +306,139 @@ def main():
         ]
 
         if selected_docs:
+            selection_signature = tuple(sorted(doc.doc_id for doc in selected_docs))
+            if st.session_state.preprocessing_review_signature != selection_signature:
+                st.session_state.preprocessing_approved = False
+                st.session_state.preprocessing_review_signature = selection_signature
+                st.session_state.preprocessed_exports = {}
+
             # Primero procesar aquellos que no tienen tokens estimados
+            analysis_status = st.empty()
+            analysis_log = st.empty()
+            analysis_events = []
+
+            def add_analysis_event(message: str) -> None:
+                analysis_events.append(message)
+                analysis_log.code("\n".join(analysis_events), language="text")
+
             with st.spinner("📊 Analizando documentos..."):
                 for doc in selected_docs:
                     if doc.estimated_tokens == 0 and doc.status == TranslationStatus.PENDING:
+                        analysis_status.info(
+                            f'🤖 Agente procesador: procesando documento "{doc.filename}"'
+                        )
+                        add_analysis_event(f"[ANALIZANDO] {doc.filename}: iniciando extracción")
                         try:
                             processor = ProcessorFactory.get_processor(doc.file_type)
                             doc.status = TranslationStatus.LOADING
                             doc = processor.process(doc)
                             doc.status = TranslationStatus.LOADED
+                            add_analysis_event(
+                                f"[COMPLETADO] {doc.filename}: {doc.estimated_tokens:,} tokens estimados"
+                            )
                         except Exception as e:
                             doc.status = TranslationStatus.ERROR
                             doc.error_message = str(e)
                             logger.error(f"Error pre-procesando {doc.filename}: {e}")
+                            add_analysis_event(f"[ERROR] {doc.filename}: {e}")
+
+            if analysis_events:
+                analysis_status.success("✅ Agente procesador: análisis finalizado")
+                with st.expander("📜 Registro del agente procesador", expanded=True):
+                    st.code("\n".join(analysis_events), language="text")
+
+            # Punto de control manual entre extracción y traducción.
+            st.divider()
+            st.subheader("🔎 Revisar procesamiento antes de traducir")
+            st.caption(
+                "El agente ya extrajo y ordenó el contenido. Revisa una muestra de cada "
+                "documento y aprueba esta etapa para habilitar la traducción."
+            )
+
+            preprocessing_errors = []
+            for doc in selected_docs:
+                if doc.status == TranslationStatus.ERROR:
+                    preprocessing_errors.append(doc.filename)
+                    st.error(f'❌ "{doc.filename}" no pudo procesarse: {doc.error_message}')
+                    continue
+
+                extracted_text = doc.full_original_text.strip()
+                with st.expander(
+                    f"📄 {doc.filename} | {len(doc.sections)} secciones | "
+                    f"{doc.estimated_tokens:,} tokens estimados"
+                ):
+                    st.text_area(
+                        "Texto extraído y ordenado",
+                        value=extracted_text[:16000],
+                        height=280,
+                        disabled=True,
+                        key=f"preprocessed_preview_{doc.doc_id}",
+                    )
+                    if len(extracted_text) > 16000:
+                        st.caption("Vista previa limitada a 16.000 caracteres.")
+
+            preprocessing_ready = bool(selected_docs) and not preprocessing_errors and all(
+                doc.status in (
+                    TranslationStatus.LOADED,
+                    TranslationStatus.COMPLETED,
+                    TranslationStatus.CACHED,
+                ) and doc.sections
+                for doc in selected_docs
+            )
+
+            if preprocessing_ready and not st.session_state.preprocessing_approved:
+                if st.button(
+                    "✅ Aprobar procesamiento y habilitar traducción",
+                    type="secondary",
+                    use_container_width=True,
+                ):
+                    st.session_state.preprocessing_approved = True
+                    st.rerun()
+            elif st.session_state.preprocessing_approved:
+                st.success("✅ Procesamiento aprobado. La traducción está habilitada.")
+            else:
+                st.warning("⚠️ Corrige los documentos con error antes de aprobar el procesamiento.")
+
+            st.subheader("📤 Exportar resultado del procesamiento")
+            st.caption(
+                "Descarga una muestra del contenido ya extraído y ordenado, antes de enviarlo a traducción."
+            )
+            if st.button(
+                "📦 Generar archivos preprocesados",
+                use_container_width=True,
+                disabled=not preprocessing_ready,
+            ):
+                preprocessed_exports = {}
+                for doc in selected_docs:
+                    try:
+                        paths = exporter.export_all_formats(
+                            doc,
+                            formats=["txt", "docx", "pdf", "latex"],
+                        )
+                        if paths:
+                            preprocessed_exports[doc.filename] = paths
+                    except Exception as e:
+                        st.error(f'❌ Error exportando preprocesado "{doc.filename}": {e}')
+                        logger.exception(f"Error exportando preprocesado {doc.filename}")
+                st.session_state.preprocessed_exports = preprocessed_exports
+
+            if st.session_state.preprocessed_exports:
+                with st.expander("📎 Descargas preprocesadas", expanded=True):
+                    for doc_index, (filename, paths) in enumerate(
+                        st.session_state.preprocessed_exports.items()
+                    ):
+                        st.markdown(f"**{filename}**")
+                        columns = st.columns(min(4, len(paths)))
+                        for path_index, path in enumerate(paths):
+                            if path.exists():
+                                with columns[path_index % len(columns)]:
+                                    st.download_button(
+                                        label=f"⬇️ {path.suffix.upper()[1:]}",
+                                        data=path.read_bytes(),
+                                        file_name=path.name,
+                                        key=f"preprocessed_download_{doc_index}_{path_index}",
+                                        use_container_width=True,
+                                    )
 
             total_tokens = sum(d.estimated_tokens for d in selected_docs if d.estimated_tokens)
 
@@ -348,7 +477,11 @@ def main():
                     if st.button(
                         f"🚀 Traducir {len(selected_docs)} documento(s) {'(GRATIS)' if 'gemini' in provider_names else ''}",
                         type="primary",
-                        disabled=st.session_state.translations_started,
+                        disabled=(
+                            st.session_state.translations_started
+                            or not st.session_state.preprocessing_approved
+                            or not preprocessing_ready
+                        ),
                         use_container_width=True,
                     ):
                         st.session_state.translations_started = True
@@ -365,25 +498,40 @@ def main():
                         progress_container = st.container()
                         global_progress_bar = progress_container.progress(0)
                         global_status_text = progress_container.empty()
+                        agent_status_text = progress_container.empty()
+                        agent_events = []
+                        agent_events_lock = threading.Lock()
+
+                        def add_agent_event(message: str) -> None:
+                            # Este callback corre en workers; no actualiza widgets.
+                            with agent_events_lock:
+                                agent_events.append(message)
 
                         # Callbacks de progreso
                         def doc_progress(progress: TranslationProgress):
-                            # Solo logging - la UI se actualiza al final con st.rerun()
+                            phase = progress.status.value
+                            if progress.status == TranslationStatus.ERROR:
+                                add_agent_event(
+                                    f"[ERROR] {progress.filename}: {progress.error_message or 'error no especificado'}"
+                                )
+                            else:
+                                detail = f"fase={phase}"
+                                if progress.total_chunks:
+                                    detail += f" ({progress.current_chunk}/{progress.total_chunks} chunks)"
+                                # Solo conservar cambios de fase y checkpoints de chunks.
+                                if not progress.total_chunks or progress.current_chunk in (0, progress.total_chunks):
+                                    add_agent_event(f"[{phase.upper()}] {progress.filename}: {detail}")
                             logger.debug(
                                 f"Progreso {progress.filename}: "
-                                f"{progress.status.value} - {progress.progress*100:.0f}%"
+                                f"{phase} - {progress.progress*100:.0f}%"
                             )
 
                         def global_progress(prog: float, completed: int, total: int):
-                            try:
-                                global_progress_bar.progress(prog)
-                                status_icon = "✅" if prog >= 1.0 else "🔄"
-                                global_status_text.text(
-                                    f"{status_icon} Progreso global: {completed}/{total} documentos completados "
-                                    f"({prog*100:.0f}%)"
-                                )
-                            except Exception:
-                                pass
+                            # El pipeline llama este callback desde un worker.
+                            # La UI se actualiza solo en el hilo principal.
+                            add_agent_event(
+                                f"[PROGRESO] {completed}/{total} documentos completados"
+                            )
 
                         # Ejecutar traducción
                         try:
@@ -396,6 +544,13 @@ def main():
 
                             st.session_state.translated_docs = translated
                             st.session_state.translations_started = False
+
+                            with agent_events_lock:
+                                completed_events = list(agent_events)
+                            if completed_events:
+                                agent_status_text.success("✅ Agente traductor: proceso finalizado")
+                                with progress_container.expander("📜 Registro del agente traductor"):
+                                    st.code("\n".join(completed_events), language="text")
 
                             success_count = sum(
                                 1 for d in translated
@@ -424,6 +579,13 @@ def main():
                         except Exception as e:
                             st.session_state.translations_started = False
                             st.error(f"❌ Error durante la traducción: {str(e)}")
+                            global_progress_bar.progress(0)
+                            global_status_text.error("❌ La traducción se detuvo por un error")
+                            with agent_events_lock:
+                                failed_events = list(agent_events)
+                            if failed_events:
+                                with progress_container.expander("📜 Registro del agente traductor", expanded=True):
+                                    st.code("\n".join(failed_events), language="text")
                             logger.exception("Error en pipeline de traducción")
 
             except Exception as e:
@@ -474,12 +636,28 @@ def main():
         # Botones de exportación
         col1, col2 = st.columns(2)
 
+        def export_document_formats(doc, formats):
+            """Exporta los formatos solicitados y conserva errores por formato."""
+            exported = []
+            formatters = {
+                "original": exporter.export_original_format,
+                "pdf": exporter.export_to_pdf,
+                "docx": exporter.export_to_docx,
+                "txt": exporter.export_to_txt,
+                "latex": exporter.export_to_latex,
+            }
+            for fmt in formats:
+                try:
+                    exported.append(formatters[fmt](doc))
+                except Exception as e:
+                    st.error(f"❌ {doc.filename} ({fmt}): {e}")
+                    logger.exception(f"Error exportando {doc.filename} a {fmt}")
+            return exported
+
         with col1:
             if st.button("📦 Generar descargas individuales", use_container_width=True):
                 exported = {}
-                formats_to_export = ["pdf", "docx", "txt", "latex"] if include_all else [export_format.lower()]
-                
-                # Mapeo de formatos
+                formats_to_export = ["pdf", "docx", "txt", "latex"] if include_all else []
                 format_map = {
                     "formato original": "original",
                     "pdf": "pdf",
@@ -487,25 +665,13 @@ def main():
                     "txt": "txt",
                     "latex": "latex",
                 }
-                
+                if not include_all:
+                    formats_to_export = [format_map.get(export_format.lower(), "original")]
+
                 for doc in completed_docs:
-                    try:
-                        fmt = export_format.lower()
-                        if fmt == "formato original":
-                            path = exporter.export_original_format(doc)
-                        elif fmt == "pdf":
-                            path = exporter.export_to_pdf(doc)
-                        elif fmt == "docx (estilo académico)":
-                            path = exporter.export_to_docx(doc)
-                        elif fmt == "txt":
-                            path = exporter.export_to_txt(doc)
-                        elif fmt == "latex":
-                            path = exporter.export_to_latex(doc)
-                        else:
-                            path = exporter.export_original_format(doc)
-                        exported[doc.filename] = path
-                    except Exception as e:
-                        st.error(f"❌ Error exportando {doc.filename}: {e}")
+                    paths = export_document_formats(doc, formats_to_export)
+                    if paths:
+                        exported[doc.filename] = paths[0] if len(paths) == 1 else paths
 
                 st.session_state.exported_files = exported
 
@@ -515,24 +681,18 @@ def main():
         with col2:
             if st.button("📥 Descargar todo en ZIP", use_container_width=True):
                 exported_paths = []
+                formats_to_export = ["pdf", "docx", "txt", "latex"] if include_all else []
+                format_map = {
+                    "formato original": "original",
+                    "pdf": "pdf",
+                    "docx (estilo académico)": "docx",
+                    "txt": "txt",
+                    "latex": "latex",
+                }
+                if not include_all:
+                    formats_to_export = [format_map.get(export_format.lower(), "original")]
                 for doc in completed_docs:
-                    try:
-                        fmt = export_format.lower()
-                        if fmt == "formato original":
-                            path = exporter.export_original_format(doc)
-                        elif fmt == "pdf":
-                            path = exporter.export_to_pdf(doc)
-                        elif fmt == "docx (estilo académico)":
-                            path = exporter.export_to_docx(doc)
-                        elif fmt == "txt":
-                            path = exporter.export_to_txt(doc)
-                        elif fmt == "latex":
-                            path = exporter.export_to_latex(doc)
-                        else:
-                            path = exporter.export_original_format(doc)
-                        exported_paths.append(path)
-                    except Exception as e:
-                        st.error(f"❌ Error exportando {doc.filename}: {e}")
+                    exported_paths.extend(export_document_formats(doc, formats_to_export))
 
                 if exported_paths:
                     zip_path = exporter.create_zip_bundle(exported_paths)
@@ -553,15 +713,17 @@ def main():
             cols = st.columns(3)
             for i, (filename, path) in enumerate(st.session_state.exported_files.items()):
                 with cols[i % 3]:
-                    if path.exists():
-                        with open(path, "rb") as f:
-                            st.download_button(
-                                label=f"⬇️ {path.name}",
-                                data=f.read(),
-                                file_name=path.name,
-                                key=f"download_{filename}_{i}",
-                                use_container_width=True,
-                            )
+                    paths = path if isinstance(path, list) else [path]
+                    for path_index, file_path in enumerate(paths):
+                        if file_path.exists():
+                            with open(file_path, "rb") as f:
+                                st.download_button(
+                                    label=f"⬇️ {file_path.name}",
+                                    data=f.read(),
+                                    file_name=file_path.name,
+                                    key=f"download_{filename}_{i}_{path_index}",
+                                    use_container_width=True,
+                                )
 
     # =========================================================================
     # Sección de ayuda / información

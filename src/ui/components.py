@@ -350,7 +350,7 @@ def render_provider_selector(
 
     provider_info = {
         "gemini": {
-            "name": "🆓 Google Gemini 1.5 Flash",
+            "name": "🆓 Google Gemini 3.1 Flash Lite",
             "description": "1M tokens/día GRATIS. Si se agota, pasa AUTOMÁTICAMENTE a DeepL.",
             "available": available_providers.get("gemini", False),
             "color": "#3b82f6",
