@@ -22,14 +22,14 @@ def inject_styles(dark_mode: bool = None) -> None:
 
 def render_theme_selector() -> None:
     """Renderiza el selector de tema (claro/oscuro)."""
-    # Inicializar estado
+    # Inicializar estado (modo claro por defecto)
     if "dark_mode" not in st.session_state:
         st.session_state.dark_mode = False
-    
+
     # Obtener icono según modo
     icon = "🌙" if not st.session_state.dark_mode else "☀️"
     label = "Modo oscuro" if not st.session_state.dark_mode else "Modo claro"
-    
+
     # Botón en la barra lateral o en la parte superior
     if st.sidebar.button(
         f"{icon} {label}",
@@ -42,13 +42,37 @@ def render_theme_selector() -> None:
 
 def render_header() -> None:
     """Renderiza el encabezado principal de la aplicación."""
+    # IMPORTANTE: no usamos <h1> aquí. Streamlit intercepta cualquier
+    # etiqueta <h1>-<h6> dentro del HTML (aunque venga con
+    # unsafe_allow_html), la convierte en un encabezado nativo con
+    # ancla de navegación, le reemplaza el id por uno autogenerado, y
+    # mueve el texto real a un <span data-heading-text> interno. Eso
+    # hacía que nuestro id="app-header-title" nunca coincidiera con
+    # nada y el texto quedara con el color por defecto (negro).
+    # Un <div> no recibe ese tratamiento, así que lo usamos en su
+    # lugar y lo estilizamos para que se vea como un título.
     st.markdown("""
+        <style>
+        #app-header-title {
+            color: #ffffff !important;
+            margin: 0;
+            font-size: 1.8rem;
+            font-weight: 700;
+            letter-spacing: -0.5px;
+            line-height: 1.3;
+        }
+        #app-header-subtitle {
+            color: rgba(255, 255, 255, 0.85) !important;
+            margin: 0.25rem 0 0 0;
+            font-size: 0.95rem;
+            font-weight: 300;
+        }
+        </style>
         <div class="app-header">
-            <h1>📄 Paper Translator</h1>
-            <p>Traducción masiva de papers científicos del inglés al español con preservación de formato</p>
+            <div id="app-header-title">📄 Paper Translator</div>
+            <div id="app-header-subtitle">Traducción masiva de papers científicos del inglés al español con preservación de formato</div>
         </div>
     """, unsafe_allow_html=True)
-
 
 def render_status_badge(status: TranslationStatus) -> str:
     """Devuelve el HTML de un badge de estado."""
@@ -82,79 +106,104 @@ def render_file_table(
     st.subheader(f"📊 Archivos cargados ({len(documents)})")
     st.markdown("Selecciona los documentos que deseas traducir:")
 
-    # Contenedor con scroll
-    st.markdown('<div class="file-table-container">', unsafe_allow_html=True)
+    # Contenedor real de Streamlit (reemplaza el <div> roto anterior).
+    # El estilo de "tarjeta" se aplica vía CSS al propio bloque que
+    # genera st.container(), no a un div manual que Streamlit no
+    # respeta como padre de lo que viene después.
+    table_container = st.container()
 
-    # Crear encabezados
-    cols = st.columns([0.5, 3, 1, 1, 1.5, 1.2])
-    headers = ["", "📄 Nombre", "📁 Tipo", "📦 Tamaño", "📊 Tokens aprox.", "📌 Estado"]
-    for col, header in zip(cols, headers):
-        col.markdown(f"**{header}**")
-
-    st.markdown("---")
-
-    updated_selections = {}
-
-    for doc in documents:
+    with table_container:
+        # Crear encabezados
         cols = st.columns([0.5, 3, 1, 1, 1.5, 1.2])
-
-        # Checkbox
-        with cols[0]:
-            is_selected = selected_ids.get(doc.doc_id, True)
-            updated_selections[doc.doc_id] = st.checkbox(
-                "Seleccionar",
-                value=is_selected,
-                key=f"select_{doc.doc_id}",
-                label_visibility="collapsed",
-            )
-
-        # Nombre
-        with cols[1]:
-            st.text(doc.filename)
-
-        # Tipo
-        with cols[2]:
-            st.markdown(f"`{doc.file_type.value.upper()}`")
-
-        # Tamaño
-        with cols[3]:
-            if doc.file_size_mb > 1:
-                st.text(f"{doc.file_size_mb:.2f} MB")
-            else:
-                st.text(f"{doc.file_size_kb:.1f} KB")
-
-        # Tokens / Páginas
-        with cols[4]:
-            info_parts = []
-            if doc.estimated_tokens:
-                info_parts.append(f"{doc.estimated_tokens:,} tok")
-            if doc.page_count:
-                info_parts.append(f"{doc.page_count} pág")
-            st.text(" | ".join(info_parts) if info_parts else "-")
-
-        # Estado
-        with cols[5]:
-            st.markdown(render_status_badge(doc.status), unsafe_allow_html=True)
-
-        # Barra de progreso si está traduciendo
-        if doc.status in (TranslationStatus.TRANSLATING, TranslationStatus.LOADING):
-            progress = doc.progress or 0.0
-            st.progress(progress, text=f"Progreso: {progress*100:.0f}%")
-
-        # Mensaje de error si existe
-        if doc.status == TranslationStatus.ERROR and doc.error_message:
-            st.markdown(
-                f'<div class="status-card error">❌ {doc.error_message}</div>',
-                unsafe_allow_html=True,
-            )
+        headers = ["", "📄 Nombre", "📁 Tipo", "📦 Tamaño", "📊 Tokens aprox.", "📌 Estado"]
+        for col, header in zip(cols, headers):
+            col.markdown(f"**{header}**")
 
         st.markdown("---")
 
-    st.markdown('</div>', unsafe_allow_html=True)
+        updated_selections = {}
+
+        for doc in documents:
+            cols = st.columns([0.5, 3, 1, 1, 1.5, 1.2])
+
+            # Checkbox
+            with cols[0]:
+                is_selected = selected_ids.get(doc.doc_id, True)
+                updated_selections[doc.doc_id] = st.checkbox(
+                    "Seleccionar",
+                    value=is_selected,
+                    key=f"select_{doc.doc_id}",
+                    label_visibility="collapsed",
+                )
+
+            # Nombre
+            with cols[1]:
+                st.text(doc.filename)
+
+            # Tipo
+            with cols[2]:
+                st.markdown(f"`{doc.file_type.value.upper()}`")
+
+            # Tamaño
+            with cols[3]:
+                if doc.file_size_mb > 1:
+                    st.text(f"{doc.file_size_mb:.2f} MB")
+                else:
+                    st.text(f"{doc.file_size_kb:.1f} KB")
+
+            # Tokens / Páginas
+            with cols[4]:
+                info_parts = []
+                if doc.estimated_tokens:
+                    info_parts.append(f"{doc.estimated_tokens:,} tok")
+                if doc.page_count:
+                    info_parts.append(f"{doc.page_count} pág")
+                st.text(" | ".join(info_parts) if info_parts else "-")
+
+            # Estado
+            with cols[5]:
+                st.markdown(render_status_badge(doc.status), unsafe_allow_html=True)
+
+            # Barra de progreso si está traduciendo
+            if doc.status in (TranslationStatus.TRANSLATING, TranslationStatus.LOADING):
+                progress = doc.progress or 0.0
+                st.progress(progress, text=f"Progreso: {progress*100:.0f}%")
+
+            # Mensaje de error si existe
+            if doc.status == TranslationStatus.ERROR and doc.error_message:
+                st.markdown(
+                    f'<div class="status-card error">❌ {doc.error_message}</div>',
+                    unsafe_allow_html=True,
+                )
+
+            st.markdown("---")
+
     return updated_selections
 
-
 # components.py - Sección render_side_by_side_preview mejorada
+
+def _render_preview_panel(title: str, text: str, panel_class: str, height: str) -> None:
+    """
+    Renderiza un panel de previsualización (original o traducción) como UN SOLO
+    bloque HTML, para que el encabezado y el contenido queden dentro del
+    mismo recuadro (evita que el texto se escape fuera del contenedor).
+    """
+    preview_text = _get_preview_text(text, max_lines=50)
+    content_html = _format_text(preview_text)
+
+    truncated_note = ""
+    if len((text or "").splitlines()) > 50:
+        truncated_note = '<div class="diff-truncated-note">📜 ... (desplázate para ver más)</div>'
+
+    panel_html = (
+        f'<div class="diff-panel {panel_class}" style="height: {height};">'
+        f'<h4>{title}</h4>'
+        f'<div class="diff-content">{content_html}</div>'
+        f'{truncated_note}'
+        f'</div>'
+    )
+    st.markdown(panel_html, unsafe_allow_html=True)
+
 
 def render_side_by_side_preview(document: Document) -> None:
     """Renderiza un panel dividido con el texto original y la traducción."""
@@ -183,7 +232,7 @@ def render_side_by_side_preview(document: Document) -> None:
 
     # Botones de navegación - más compactos
     st.markdown('<div class="section-nav">', unsafe_allow_html=True)
-    
+
     # Mostrar botones en filas de 8 para que ocupen menos espacio
     cols_per_row = 8
     for i in range(0, len(section_ids), cols_per_row):
@@ -203,7 +252,7 @@ def render_side_by_side_preview(document: Document) -> None:
                 ):
                     st.session_state[f"active_section_{document.doc_id}"] = sec_id
                     st.rerun()
-    
+
     st.markdown('</div>', unsafe_allow_html=True)
 
     # Obtener sección activa
@@ -231,53 +280,23 @@ def render_side_by_side_preview(document: Document) -> None:
     if view_mode == "📖 Lado a lado":
         col1, col2 = st.columns(2)
         with col1:
-            st.markdown(f'<div class="diff-panel original" style="height: {PANEL_HEIGHT};">', unsafe_allow_html=True)
-            st.markdown("#### 📄 Original (Inglés)")
-            # Mostrar solo primeras líneas con scroll
-            preview_text = _get_preview_text(original_text, max_lines=50)
-            st.markdown(
-                f'<div class="diff-content">{_format_text(preview_text)}</div>',
-                unsafe_allow_html=True,
+            _render_preview_panel(
+                "📄 Original (Inglés)", original_text, "original", PANEL_HEIGHT
             )
-            # Indicador si hay más contenido
-            if len(original_text.splitlines()) > 50:
-                st.caption("📜 ... (desplázate para ver más)")
-            st.markdown('</div>', unsafe_allow_html=True)
         with col2:
-            st.markdown(f'<div class="diff-panel translated" style="height: {PANEL_HEIGHT};">', unsafe_allow_html=True)
-            st.markdown("#### 🌐 Traducción (Español)")
-            preview_text = _get_preview_text(translated_text, max_lines=50)
-            st.markdown(
-                f'<div class="diff-content">{_format_text(preview_text)}</div>',
-                unsafe_allow_html=True,
+            _render_preview_panel(
+                "🌐 Traducción (Español)", translated_text, "translated", PANEL_HEIGHT
             )
-            if len(translated_text.splitlines()) > 50:
-                st.caption("📜 ... (desplázate para ver más)")
-            st.markdown('</div>', unsafe_allow_html=True)
 
     elif view_mode == "📝 Solo original":
-        st.markdown(f'<div class="diff-panel original" style="height: {PANEL_HEIGHT};">', unsafe_allow_html=True)
-        st.markdown("#### 📄 Original (Inglés)")
-        preview_text = _get_preview_text(original_text, max_lines=50)
-        st.markdown(
-            f'<div class="diff-content">{_format_text(preview_text)}</div>',
-            unsafe_allow_html=True,
+        _render_preview_panel(
+            "📄 Original (Inglés)", original_text, "original", PANEL_HEIGHT
         )
-        if len(original_text.splitlines()) > 50:
-            st.caption("📜 ... (desplázate para ver más)")
-        st.markdown('</div>', unsafe_allow_html=True)
 
     else:  # Solo traducción
-        st.markdown(f'<div class="diff-panel translated" style="height: {PANEL_HEIGHT};">', unsafe_allow_html=True)
-        st.markdown("#### 🌐 Traducción (Español)")
-        preview_text = _get_preview_text(translated_text, max_lines=50)
-        st.markdown(
-            f'<div class="diff-content">{_format_text(preview_text)}</div>',
-            unsafe_allow_html=True,
+        _render_preview_panel(
+            "🌐 Traducción (Español)", translated_text, "translated", PANEL_HEIGHT
         )
-        if len(translated_text.splitlines()) > 50:
-            st.caption("📜 ... (desplázate para ver más)")
-        st.markdown('</div>', unsafe_allow_html=True)
 
 
 def _get_preview_text(text: str, max_lines: int = 50) -> str:
@@ -314,7 +333,7 @@ def _generate_diff_html(original: str, translated: str) -> str:
     dark_mode = st.session_state.get("dark_mode", False)
     bg_color = "#1a2234" if dark_mode else "#f8f9fa"
     text_color = "#e5e7eb" if dark_mode else "#1a202c"
-    
+
     return f"""
     <div style="overflow-x: auto; font-size: 0.85rem; background: {bg_color}; padding: 1rem; border-radius: 8px; color: {text_color};">
         {diff_table}

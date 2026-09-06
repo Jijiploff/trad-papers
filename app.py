@@ -282,6 +282,8 @@ def main():
                                if st.session_state.selected_ids.get(d.doc_id, False))
             st.markdown(f"**{selected_count}/{len(st.session_state.documents)}** seleccionados")
 
+        st.write("")  
+
         # Renderizar tabla
         st.session_state.selected_ids = render_file_table(
             st.session_state.documents,

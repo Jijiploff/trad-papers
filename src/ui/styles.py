@@ -1,10 +1,18 @@
-# styles.py - Versión corregida con mejor soporte para modo claro
+# styles.py - Versión con sidebar siempre oscuro
 
 def get_css(dark_mode: bool = False) -> str:
     """Devuelve el CSS personalizado según el modo seleccionado."""
     
+    # Colores para el sidebar (SIEMPRE OSCURO)
+    sidebar_bg = "#0d1117"  # Fondo oscuro estilo GitHub Dark
+    sidebar_text = "#e6edf3"  # Texto claro
+    sidebar_secondary = "#8b949e"  # Texto secundario
+    sidebar_border = "#21262d"  # Bordes
+    sidebar_hover = "#161b22"  # Hover
+    sidebar_accent = "#58a6ff"  # Azul para elementos destacados
+
     if dark_mode:
-        # Modo OSCURO
+        # Modo OSCURO (para el contenido principal)
         bg_primary = "#0a0e1a"
         bg_secondary = "#111827"
         bg_card = "#1a2234"
@@ -34,15 +42,16 @@ def get_css(dark_mode: bool = False) -> str:
         scrollbar_thumb = "#2d3748"
         scrollbar_thumb_hover = "#3b82f6"
         radio_text = "#e5e7eb"
+        button_secondary_text = "#e5e7eb"
     else:
-        # Modo CLARO - TODO fondo blanco y letras negras
+        # Modo CLARO (para el contenido principal)
         bg_primary = "#f8f9fa"
         bg_secondary = "#ffffff"
         bg_card = "#ffffff"
         bg_hover = "#f1f3f5"
         bg_header = "linear-gradient(135deg, #1e3a5f 0%, #2d5a87 100%)"
-        text_primary = "#1a202c"  # Negro
-        text_secondary = "#2d3748"  # Gris oscuro
+        text_primary = "#1a202c"
+        text_secondary = "#2d3748"
         text_muted = "#4a5568"
         border_color = "#e2e8f0"
         shadow = "0 4px 20px rgba(0,0,0,0.08)"
@@ -59,12 +68,13 @@ def get_css(dark_mode: bool = False) -> str:
         badge_secondary = "rgba(113, 128, 150, 0.15)"
         input_bg = "#ffffff"
         input_border = "#d1d5db"
-        input_text = "#1a202c"  # Negro en inputs
+        input_text = "#1a202c"
         code_bg = "#edf2f7"
         scrollbar_track = "#f1f1f1"
         scrollbar_thumb = "#cbd5e0"
         scrollbar_thumb_hover = "#a0aec0"
-        radio_text = "#1a202c"  # Negro en radio buttons
+        radio_text = "#1a202c"
+        button_secondary_text = "#1a202c"
 
     return f"""
     <style>
@@ -74,12 +84,275 @@ def get_css(dark_mode: bool = False) -> str:
         color: {text_primary};
         transition: background 0.3s ease, color 0.3s ease;
     }}
-    
+
     .main .block-container {{
         max-width: 1400px;
         padding-top: 2rem;
         padding-bottom: 2rem;
     }}
+
+    /* ============================================================
+       SIDEBAR - SIEMPRE EN MODO OSCURO
+       ============================================================ */
+
+    /* Fondo de la sidebar - siempre oscuro */
+    [data-testid="stSidebar"] {{
+        background: {sidebar_bg} !important;
+        border-right: 1px solid {sidebar_border} !important;
+    }}
+
+    [data-testid="stSidebar"] [data-testid="stVerticalBlock"] {{
+        background: {sidebar_bg} !important;
+    }}
+
+    /* Texto de la sidebar - siempre claro */
+    [data-testid="stSidebar"] *,
+    [data-testid="stSidebar"] p,
+    [data-testid="stSidebar"] label,
+    [data-testid="stSidebar"] .stCaption,
+    [data-testid="stSidebar"] [data-testid="stCaptionContainer"],
+    [data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p,
+    [data-testid="stSidebar"] h1,
+    [data-testid="stSidebar"] h2,
+    [data-testid="stSidebar"] h3,
+    [data-testid="stSidebar"] h4,
+    [data-testid="stSidebar"] h5,
+    [data-testid="stSidebar"] h6,
+    [data-testid="stSidebar"] .stMetric label,
+    [data-testid="stSidebar"] .stMetric .stMetricValue,
+    [data-testid="stSidebar"] .stMetric .stMetricDelta,
+    [data-testid="stSidebar"] [data-testid="stWidgetLabel"] p,
+    [data-testid="stSidebar"] [data-testid="stWidgetLabel"] label {{
+        color: {sidebar_text} !important;
+    }}
+
+    /* Texto secundario en sidebar */
+    [data-testid="stSidebar"] .stCaption,
+    [data-testid="stSidebar"] .stCaption p,
+    [data-testid="stSidebar"] [data-testid="stCaptionContainer"] p {{
+        color: {sidebar_secondary} !important;
+    }}
+
+    /* Divisores en sidebar */
+    [data-testid="stSidebar"] hr {{
+        border-color: {sidebar_border} !important;
+    }}
+
+    /* ===== INPUTS en SIDEBAR ===== */
+    [data-testid="stSidebar"] .stTextInput > div > div > input,
+    [data-testid="stSidebar"] .stSelectbox > div > div,
+    [data-testid="stSidebar"] .stTextArea > div > div > textarea,
+    [data-testid="stSidebar"] .stNumberInput > div > div > input,
+    [data-testid="stSidebar"] [data-testid="stTextInput"] input,
+    [data-testid="stSidebar"] [data-testid="stTextArea"] textarea,
+    [data-testid="stSidebar"] [data-testid="stNumberInput"] input {{
+        background: {sidebar_bg} !important;
+        color: {sidebar_text} !important;
+        border-color: {sidebar_border} !important;
+        border-radius: 8px !important;
+    }}
+
+    /* ===== SELECTBOX en SIDEBAR ===== */
+    [data-testid="stSidebar"] .stSelectbox > div > div,
+    [data-testid="stSidebar"] [data-testid="stSelectbox"] > div > div,
+    [data-testid="stSidebar"] [data-testid="stSelectbox"] [data-baseweb="select"] > div {{
+        background: {sidebar_bg} !important;
+        color: {sidebar_text} !important;
+        border-color: {sidebar_border} !important;
+    }}
+
+    [data-testid="stSidebar"] .stSelectbox > div > div > div,
+    [data-testid="stSidebar"] [data-testid="stSelectbox"] div {{
+        color: {sidebar_text} !important;
+    }}
+
+    /* ===== RADIO BUTTONS en SIDEBAR ===== */
+    [data-testid="stSidebar"] .stRadio > div,
+    [data-testid="stSidebar"] [data-testid="stRadio"] {{
+        color: {sidebar_text} !important;
+    }}
+
+    [data-testid="stSidebar"] .stRadio > div label,
+    [data-testid="stSidebar"] .stRadio > div label span,
+    [data-testid="stSidebar"] [data-testid="stRadio"] label,
+    [data-testid="stSidebar"] [data-testid="stRadio"] label span,
+    [data-testid="stSidebar"] [data-testid="stRadio"] label p,
+    [data-testid="stSidebar"] [data-testid="stRadio"] div[role="radiogroup"] label,
+    [data-testid="stSidebar"] .stRadio div[role="radiogroup"] label {{
+        color: {sidebar_text} !important;
+    }}
+
+    /* ===== CHECKBOXES en SIDEBAR ===== */
+    [data-testid="stSidebar"] .stCheckbox > label,
+    [data-testid="stSidebar"] [data-testid="stCheckbox"] label,
+    [data-testid="stSidebar"] [data-testid="stCheckbox"] label span,
+    [data-testid="stSidebar"] [data-testid="stCheckbox"] label p {{
+        color: {sidebar_text} !important;
+    }}
+
+    /* ===== SLIDERS en SIDEBAR ===== */
+    [data-testid="stSidebar"] .stSlider > div > div,
+    [data-testid="stSidebar"] [data-testid="stSlider"] {{
+        color: {sidebar_text} !important;
+    }}
+
+    [data-testid="stSidebar"] .stSlider label,
+    [data-testid="stSidebar"] [data-testid="stSlider"] label {{
+        color: {sidebar_secondary} !important;
+    }}
+
+    /* ===== EXPANDERS en SIDEBAR ===== */
+    [data-testid="stSidebar"] .streamlit-expanderHeader,
+    [data-testid="stSidebar"] [data-testid="stExpander"] summary {{
+        background: {sidebar_bg} !important;
+        border-radius: 10px !important;
+        border: 1px solid {sidebar_border} !important;
+        color: {sidebar_text} !important;
+    }}
+
+    [data-testid="stSidebar"] .streamlit-expanderContent,
+    [data-testid="stSidebar"] [data-testid="stExpander"] [data-testid="stExpanderDetails"] {{
+        background: {sidebar_bg} !important;
+        border-radius: 0 0 10px 10px !important;
+        border: 1px solid {sidebar_border} !important;
+        border-top: none !important;
+        color: {sidebar_text} !important;
+    }}
+
+    /* ===== BOTONES en SIDEBAR ===== */
+    [data-testid="stSidebar"] .stButton > button,
+    [data-testid="stSidebar"] [data-testid="stButton"] button {{
+        border-radius: 8px !important;
+        font-weight: 500 !important;
+        transition: all 0.2s ease !important;
+    }}
+
+    /* Botones secundarios en sidebar - fondo oscuro */
+    [data-testid="stSidebar"] .stButton > button[data-testid="baseButton-secondary"],
+    [data-testid="stSidebar"] [data-testid="baseButton-secondary"],
+    [data-testid="stSidebar"] [data-testid="stBaseButton-secondary"],
+    [data-testid="stSidebar"] button[kind="secondary"] {{
+        background: {sidebar_bg} !important;
+        color: {sidebar_text} !important;
+        border: 1px solid {sidebar_border} !important;
+    }}
+
+    [data-testid="stSidebar"] .stButton > button[data-testid="baseButton-secondary"] p,
+    [data-testid="stSidebar"] [data-testid="baseButton-secondary"] p,
+    [data-testid="stSidebar"] [data-testid="stBaseButton-secondary"] p {{
+        color: {sidebar_text} !important;
+    }}
+
+    /* Botones primarios en sidebar */
+    [data-testid="stSidebar"] .stButton > button[data-testid="baseButton-primary"],
+    [data-testid="stSidebar"] [data-testid="baseButton-primary"],
+    [data-testid="stSidebar"] [data-testid="stBaseButton-primary"],
+    [data-testid="stSidebar"] button[kind="primary"] {{
+        background: {sidebar_accent} !important;
+        color: #ffffff !important;
+        border: 1px solid {sidebar_accent} !important;
+    }}
+
+    [data-testid="stSidebar"] .stButton > button[data-testid="baseButton-primary"] p,
+    [data-testid="stSidebar"] [data-testid="baseButton-primary"] p,
+    [data-testid="stSidebar"] [data-testid="stBaseButton-primary"] p {{
+        color: #ffffff !important;
+    }}
+
+    /* ===== MÉTRICAS en SIDEBAR ===== */
+    [data-testid="stSidebar"] .stMetric,
+    [data-testid="stSidebar"] [data-testid="stMetric"] {{
+        background: {sidebar_bg};
+        padding: 1rem;
+        border-radius: 12px;
+        border: 1px solid {sidebar_border};
+        transition: all 0.2s ease;
+        color: {sidebar_text};
+    }}
+
+    [data-testid="stSidebar"] .stMetric:hover,
+    [data-testid="stSidebar"] [data-testid="stMetric"]:hover {{
+        background: {sidebar_hover};
+    }}
+
+    [data-testid="stSidebar"] .stMetric label,
+    [data-testid="stSidebar"] [data-testid="stMetricLabel"] {{
+        color: {sidebar_secondary} !important;
+        font-weight: 500 !important;
+    }}
+
+    [data-testid="stSidebar"] .stMetric .stMetricValue,
+    [data-testid="stSidebar"] [data-testid="stMetricValue"] {{
+        color: {sidebar_text} !important;
+        font-weight: 700 !important;
+    }}
+
+    /* ===== TARJETAS DE ESTADO en SIDEBAR ===== */
+    [data-testid="stSidebar"] .status-card {{
+        background: {sidebar_bg};
+        border-left: 4px solid {sidebar_accent};
+        padding: 0.75rem 1rem;
+        border-radius: 10px;
+        margin: 0.5rem 0;
+        border: 1px solid {sidebar_border};
+        color: {sidebar_text};
+    }}
+
+    [data-testid="stSidebar"] .status-card.success {{
+        border-left-color: #3fb950;
+        background: #0d1f14;
+    }}
+
+    [data-testid="stSidebar"] .status-card.error {{
+        border-left-color: #f85149;
+        background: #1f0d0d;
+    }}
+
+    [data-testid="stSidebar"] .status-card.warning {{
+        border-left-color: #d29922;
+        background: #1f1a0d;
+    }}
+
+    [data-testid="stSidebar"] .status-card.info {{
+        border-left-color: {sidebar_accent};
+        background: #0d1a2b;
+    }}
+
+    /* ===== BADGES en SIDEBAR ===== */
+    [data-testid="stSidebar"] .badge {{
+        display: inline-block;
+        padding: 0.2rem 0.6rem;
+        border-radius: 20px;
+        font-size: 0.7rem;
+        font-weight: 600;
+        letter-spacing: 0.3px;
+        transition: all 0.2s ease;
+    }}
+
+    /* ===== SCROLLBAR de SIDEBAR ===== */
+    [data-testid="stSidebar"]::-webkit-scrollbar {{
+        width: 6px;
+        height: 6px;
+    }}
+
+    [data-testid="stSidebar"]::-webkit-scrollbar-track {{
+        background: {sidebar_bg};
+        border-radius: 4px;
+    }}
+
+    [data-testid="stSidebar"]::-webkit-scrollbar-thumb {{
+        background: {sidebar_border};
+        border-radius: 4px;
+        transition: background 0.2s ease;
+    }}
+
+    [data-testid="stSidebar"]::-webkit-scrollbar-thumb:hover {{
+        background: {sidebar_accent};
+    }}
+
+    /* ============================================================
+       FIN SIDEBAR - SIEMPRE EN MODO OSCURO
+       ============================================================ */
 
     /* ===== Header ===== */
     .app-header {{
@@ -107,7 +380,7 @@ def get_css(dark_mode: bool = False) -> str:
     }}
 
     .app-header h1 {{
-        color: white;
+        color: white !important;
         margin: 0;
         font-size: 1.8rem;
         font-weight: 700;
@@ -117,7 +390,7 @@ def get_css(dark_mode: bool = False) -> str:
     }}
 
     .app-header p {{
-        color: rgba(255,255,255,0.85);
+        color: rgba(255,255,255,0.85) !important;
         margin: 0.25rem 0 0 0;
         font-size: 0.95rem;
         position: relative;
@@ -175,74 +448,83 @@ def get_css(dark_mode: bool = False) -> str:
 
     .badge-success {{
         background: {badge_success};
-        color: {success};
+        color: {success} !important;
         border: 1px solid {success}33;
     }}
 
     .badge-error {{
         background: {badge_error};
-        color: {danger};
+        color: {danger} !important;
         border: 1px solid {danger}33;
     }}
 
     .badge-warning {{
         background: {badge_warning};
-        color: {warning};
+        color: {warning} !important;
         border: 1px solid {warning}33;
     }}
 
     .badge-info {{
         background: {badge_info};
-        color: {info};
+        color: {info} !important;
         border: 1px solid {info}33;
     }}
 
     .badge-secondary {{
         background: {badge_secondary};
-        color: {text_secondary};
+        color: {text_secondary} !important;
         border: 1px solid {border_color};
     }}
 
-    /* ===== Tabla de archivos ===== */
-    .file-table-container {{
-        background: {bg_card};
-        border-radius: 12px;
-        padding: 1rem;
-        box-shadow: {shadow};
-        overflow-x: auto;
-        color: {text_primary};
+
+    /* ============================================================
+       FIX: TEXTO EN EL ÁREA PRINCIPAL (tabla de archivos, checkboxes,
+       st.text, radios, etc.)
+       El div "file-table-container" NO envuelve realmente estos
+       elementos en el DOM (Streamlit los renderiza como hermanos,
+       no como hijos), así que las reglas de arriba nunca aplican y
+       el texto queda con el color por defecto del tema (blanco).
+       Estas reglas apuntan directo al contenedor principal
+       (stMain / .main), que nunca incluye la sidebar, así que no
+       rompen el "sidebar siempre oscuro".
+       ============================================================ */
+    [data-testid="stMain"] [data-testid="stMarkdownContainer"] p,
+    [data-testid="stMain"] [data-testid="stMarkdownContainer"] li,
+    [data-testid="stMain"] [data-testid="stMarkdownContainer"] span,
+    [data-testid="stMain"] [data-testid="stMarkdownContainer"] strong,
+    [data-testid="stMain"] [data-testid="stText"],
+    [data-testid="stMain"] [data-testid="stText"] *,
+    [data-testid="stMain"] [data-testid="stCheckbox"] label,
+    [data-testid="stMain"] [data-testid="stCheckbox"] label span,
+    [data-testid="stMain"] [data-testid="stCheckbox"] label p,
+    [data-testid="stMain"] [data-testid="stWidgetLabel"] p,
+    [data-testid="stMain"] [data-testid="stWidgetLabel"] label,
+    [data-testid="stMain"] [data-testid="stCaptionContainer"] p,
+    .main [data-testid="stMarkdownContainer"] p,
+    .main [data-testid="stMarkdownContainer"] li,
+    .main [data-testid="stMarkdownContainer"] span,
+    .main [data-testid="stText"],
+    .main [data-testid="stText"] *,
+    .main [data-testid="stCheckbox"] label,
+    .main [data-testid="stCheckbox"] label span,
+    .main [data-testid="stWidgetLabel"] p,
+    .main [data-testid="stWidgetLabel"] label {{
+        color: {text_primary} !important;
     }}
 
-    .file-table {{
-        width: 100%;
-        border-collapse: collapse;
-        font-size: 0.9rem;
+    [data-testid="stMain"] [data-testid="stMarkdownContainer"] .app-header h1,
+    .main [data-testid="stMarkdownContainer"] .app-header h1,
+    .app-header h1 {{
+        color: #ffffff !important;
     }}
 
-    .file-table th {{
-        background: {bg_secondary if dark_mode else '#f7fafc'};
-        padding: 0.75rem 1rem;
-        text-align: left;
-        font-weight: 600;
-        color: {text_secondary};
-        border-bottom: 2px solid {border_color};
-        font-size: 0.8rem;
-        text-transform: uppercase;
-        letter-spacing: 0.5px;
+    [data-testid="stMain"] [data-testid="stMarkdownContainer"] .app-header p,
+    .main [data-testid="stMarkdownContainer"] .app-header p,
+    .app-header p {{
+        color: rgba(255, 255, 255, 0.85) !important;
     }}
 
-    .file-table td {{
-        padding: 0.75rem 1rem;
-        border-bottom: 1px solid {border_color};
-        vertical-align: middle;
-        color: {text_primary};
-    }}
-
-    .file-table tr:hover {{
-        background: {bg_hover};
-    }}
-
-    /* ===== Panel side-by-side ===== */
+    /* ===== Panel side-by-side (previsualización) ===== */
     .diff-panel {{
         background: {bg_card};
         border: 1px solid {border_color};
@@ -252,7 +534,8 @@ def get_css(dark_mode: bool = False) -> str:
         box-shadow: {shadow};
         transition: all 0.2s ease;
         color: {text_primary};
-        height: 350px;
+        display: flex;
+        flex-direction: column;
     }}
 
     .diff-panel:hover {{
@@ -260,7 +543,7 @@ def get_css(dark_mode: bool = False) -> str:
     }}
 
     .diff-panel h4 {{
-        margin-top: 0;
+        margin: 0 0 0.5rem 0;
         padding-bottom: 0.5rem;
         border-bottom: 2px solid {border_color};
         color: {text_secondary};
@@ -268,16 +551,17 @@ def get_css(dark_mode: bool = False) -> str:
         font-weight: 600;
         text-transform: uppercase;
         letter-spacing: 0.5px;
+        flex-shrink: 0;
     }}
 
     .diff-panel.original h4 {{
         border-bottom-color: {accent};
-        color: {accent};
+        color: {accent} !important;
     }}
 
     .diff-panel.translated h4 {{
         border-bottom-color: {success};
-        color: {success};
+        color: {success} !important;
     }}
 
     .diff-content {{
@@ -286,6 +570,14 @@ def get_css(dark_mode: bool = False) -> str:
         white-space: pre-wrap;
         word-wrap: break-word;
         color: {text_primary};
+        flex: 1;
+    }}
+
+    .diff-truncated-note {{
+        margin-top: 0.5rem;
+        font-size: 0.75rem;
+        color: {text_muted};
+        flex-shrink: 0;
     }}
 
     /* ===== Navegación de secciones ===== */
@@ -300,62 +592,106 @@ def get_css(dark_mode: bool = False) -> str:
         box-shadow: {shadow};
     }}
 
-    /* ===== INPUTS - Modo claro con letras negras ===== */
+    /* ===== INPUTS en CONTENIDO PRINCIPAL ===== */
     .stTextInput > div > div > input,
     .stSelectbox > div > div,
     .stTextArea > div > div > textarea,
-    .stNumberInput > div > div > input {{
+    .stNumberInput > div > div > input,
+    [data-testid="stTextInput"] input,
+    [data-testid="stTextArea"] textarea,
+    [data-testid="stNumberInput"] input {{
         background: {input_bg} !important;
         color: {input_text} !important;
         border-color: {input_border} !important;
         border-radius: 8px !important;
     }}
 
-    /* ===== RADIO BUTTONS - Modo claro con letras negras ===== */
-    .stRadio > div {{
+    /* ===== SELECTBOX en CONTENIDO PRINCIPAL ===== */
+    .stSelectbox > div > div,
+    [data-testid="stSelectbox"] > div > div,
+    [data-testid="stSelectbox"] [data-baseweb="select"] > div {{
+        background: {input_bg} !important;
+        color: {input_text} !important;
+        border-color: {input_border} !important;
+    }}
+
+    .stSelectbox > div > div > div,
+    [data-testid="stSelectbox"] div {{
+        color: {input_text} !important;
+    }}
+
+    /* ===== RADIO BUTTONS en CONTENIDO PRINCIPAL ===== */
+    .stRadio > div,
+    [data-testid="stRadio"] {{
         color: {radio_text} !important;
     }}
 
-    .stRadio > div label {{
-        color: {radio_text} !important;
-        font-weight: 500 !important;
-    }}
-
-    .stRadio > div label span {{
+    .stRadio > div label,
+    .stRadio > div label span,
+    [data-testid="stRadio"] label,
+    [data-testid="stRadio"] label span,
+    [data-testid="stRadio"] label p,
+    [data-testid="stRadio"] div[role="radiogroup"] label {{
         color: {radio_text} !important;
     }}
 
     /* ===== CHECKBOXES ===== */
-    .stCheckbox > label {{
+    .stCheckbox > label,
+    [data-testid="stCheckbox"] label,
+    [data-testid="stCheckbox"] label span,
+    [data-testid="stCheckbox"] label p {{
         color: {text_primary} !important;
     }}
 
-    /* ===== BUTTONS ===== */
-    .stButton > button {{
+    /* ===== BUTTONS en CONTENIDO PRINCIPAL ===== */
+    .stButton > button,
+    [data-testid="stButton"] button,
+    button[kind="primary"],
+    button[kind="secondary"] {{
         border-radius: 8px !important;
         font-weight: 500 !important;
         transition: all 0.2s ease !important;
-        color: {text_primary} !important;
     }}
 
-    .stButton > button:hover {{
+    .stButton > button:hover,
+    [data-testid="stButton"] button:hover {{
         transform: translateY(-2px);
         box-shadow: 0 4px 12px rgba(0,0,0,0.15);
     }}
 
-    .stButton > button[data-testid="baseButton-primary"] {{
+    .stButton > button[data-testid="baseButton-primary"],
+    [data-testid="baseButton-primary"],
+    [data-testid="stBaseButton-primary"],
+    button[kind="primary"] {{
         background: {accent} !important;
-        color: white !important;
+        color: #ffffff !important;
+        border: 1px solid {accent} !important;
     }}
 
-    .stButton > button[data-testid="baseButton-secondary"] {{
+    .stButton > button[data-testid="baseButton-primary"] p,
+    [data-testid="baseButton-primary"] p,
+    [data-testid="stBaseButton-primary"] p {{
+        color: #ffffff !important;
+    }}
+
+    .stButton > button[data-testid="baseButton-secondary"],
+    [data-testid="baseButton-secondary"],
+    [data-testid="stBaseButton-secondary"],
+    button[kind="secondary"] {{
         background: {bg_secondary} !important;
-        color: {text_primary} !important;
-        border: 1px solid {border_color} !important;
+        color: {button_secondary_text} !important;
+        border: 1px solid {input_border} !important;
+    }}
+
+    .stButton > button[data-testid="baseButton-secondary"] p,
+    [data-testid="baseButton-secondary"] p,
+    [data-testid="stBaseButton-secondary"] p {{
+        color: {button_secondary_text} !important;
     }}
 
     /* ===== MÉTRICAS ===== */
-    .stMetric {{
+    .stMetric,
+    [data-testid="stMetric"] {{
         background: {bg_card};
         padding: 1rem;
         border-radius: 12px;
@@ -364,30 +700,35 @@ def get_css(dark_mode: bool = False) -> str:
         color: {text_primary};
     }}
 
-    .stMetric:hover {{
+    .stMetric:hover,
+    [data-testid="stMetric"]:hover {{
         transform: translateY(-2px);
         box-shadow: 0 8px 25px rgba(0,0,0,0.12);
     }}
 
-    .stMetric label {{
+    .stMetric label,
+    [data-testid="stMetricLabel"] {{
         color: {text_secondary} !important;
         font-weight: 500 !important;
     }}
 
-    .stMetric .stMetricValue {{
+    .stMetric .stMetricValue,
+    [data-testid="stMetricValue"] {{
         color: {text_primary} !important;
         font-weight: 700 !important;
     }}
 
     /* ===== EXPANDERS ===== */
-    .streamlit-expanderHeader {{
+    .streamlit-expanderHeader,
+    [data-testid="stExpander"] summary {{
         background: {bg_card} !important;
         border-radius: 10px !important;
         border: 1px solid {border_color} !important;
         color: {text_primary} !important;
     }}
 
-    .streamlit-expanderContent {{
+    .streamlit-expanderContent,
+    [data-testid="stExpander"] [data-testid="stExpanderDetails"] {{
         background: {bg_card} !important;
         border-radius: 0 0 10px 10px !important;
         border: 1px solid {border_color} !important;
@@ -407,7 +748,7 @@ def get_css(dark_mode: bool = False) -> str:
     .stTabs [data-baseweb="tab"] {{
         border-radius: 8px;
         padding: 0.4rem 0.8rem;
-        color: {text_secondary};
+        color: {text_secondary} !important;
         font-weight: 500;
         transition: all 0.2s ease;
         font-size: 0.85rem;
@@ -415,7 +756,7 @@ def get_css(dark_mode: bool = False) -> str:
 
     .stTabs [data-baseweb="tab"]:hover {{
         background: {bg_hover};
-        color: {text_primary};
+        color: {text_primary} !important;
     }}
 
     .stTabs [aria-selected="true"] {{
@@ -481,7 +822,7 @@ def get_css(dark_mode: bool = False) -> str:
             padding: 0.5rem;
         }}
         .diff-panel {{
-            height: 250px;
+            height: 250px !important;
             padding: 0.75rem;
         }}
         .section-nav {{
@@ -490,27 +831,20 @@ def get_css(dark_mode: bool = False) -> str:
         }}
     }}
 
-    /* ===== SELECTBOX ===== */
-    .stSelectbox > div > div {{
-        background: {input_bg} !important;
-        color: {input_text} !important;
-    }}
-
-    .stSelectbox > div > div > div {{
-        color: {input_text} !important;
-    }}
-
     /* ===== METRICAS DE CACHÉ ===== */
-    .stMetric .stMetricDelta {{
+    .stMetric .stMetricDelta,
+    [data-testid="stMetricDelta"] {{
         color: {text_muted} !important;
     }}
 
-    /* ===== SLIDERS ===== */
-    .stSlider > div > div {{
+    /* ===== SLIDERS en CONTENIDO PRINCIPAL ===== */
+    .stSlider > div > div,
+    [data-testid="stSlider"] {{
         color: {text_primary} !important;
     }}
 
-    .stSlider label {{
+    .stSlider label,
+    [data-testid="stSlider"] label {{
         color: {text_secondary} !important;
     }}
 
@@ -521,6 +855,47 @@ def get_css(dark_mode: bool = False) -> str:
 
     .stAlert > div {{
         color: {text_primary} !important;
+    }}
+
+    [data-testid="stAlert"] [data-testid="stMarkdownContainer"] p {{
+        color: inherit !important;
+    }}
+
+    /* ============================================================
+       Elementos de la SIDEBAR que necesitan override adicional
+       (van al final para ganar siempre la cascada frente a las
+       reglas generales de arriba)
+       ============================================================ */
+
+    /* Sidebar - todos los elementos dentro de la sidebar */
+    [data-testid="stSidebar"] [data-testid="stMarkdownContainer"],
+    [data-testid="stSidebar"] .stMarkdown,
+    [data-testid="stSidebar"] [data-testid="stImage"],
+    [data-testid="stSidebar"] [data-testid="stCaptionContainer"] {{
+        color: {sidebar_text} !important;
+    }}
+
+    /* Sidebar - todos los textos dentro de la sidebar */
+    [data-testid="stSidebar"] div,
+    [data-testid="stSidebar"] span,
+    [data-testid="stSidebar"] p,
+    [data-testid="stSidebar"] h1,
+    [data-testid="stSidebar"] h2,
+    [data-testid="stSidebar"] h3,
+    [data-testid="stSidebar"] h4,
+    [data-testid="stSidebar"] h5,
+    [data-testid="stSidebar"] h6,
+    [data-testid="stSidebar"] .stCaption,
+    [data-testid="stSidebar"] .stCaption p {{
+        color: {sidebar_text} !important;
+    }}
+
+    /* Sidebar - excepción para los botones primarios que deben ser blancos */
+    [data-testid="stSidebar"] .stButton > button[data-testid="baseButton-primary"] *,
+    [data-testid="stSidebar"] [data-testid="baseButton-primary"] *,
+    [data-testid="stSidebar"] [data-testid="stBaseButton-primary"] *,
+    [data-testid="stSidebar"] button[kind="primary"] * {{
+        color: #ffffff !important;
     }}
     </style>
     """

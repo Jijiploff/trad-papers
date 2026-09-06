@@ -6,6 +6,7 @@ ENV/
 
 cache/
 logs/
+exports/
 
 # Python cache
 __pycache__/
