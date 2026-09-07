@@ -114,6 +114,11 @@ class TranslationCache:
             "created_at": datetime.now().isoformat(),
             "estimated_tokens": document.estimated_tokens,
             "sections": sections_data,
+            "metadata": {
+                "layout_elements": document.metadata.get("layout_elements", []),
+                "layout_backend": document.metadata.get("layout_backend", ""),
+                "preprocessed": document.metadata.get("preprocessed", False),
+            },
             "page_count": document.page_count,
         }
 
@@ -161,6 +166,7 @@ class TranslationCache:
         document.estimated_tokens = cache_data.get("estimated_tokens", 0)
         document.translated_tokens = document.estimated_tokens
         document.page_count = cache_data.get("page_count")
+        document.metadata.update(cache_data.get("metadata", {}))
         document.provider_used = cache_data.get("provider")
         return document
 

@@ -8,6 +8,7 @@ import uuid
 import re
 
 from src.core.models import Document, Section, SectionType, FileType
+from src.processors.text_normalizer import normalize_extracted_text
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -98,6 +99,7 @@ class BaseFileProcessor(ABC):
         try:
             # Extraer texto
             full_text = self.extract_text(document)
+            full_text = normalize_extracted_text(full_text)
 
             # Obtener número de páginas
             document.page_count = self.get_page_count(document)

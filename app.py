@@ -33,6 +33,7 @@ from src.core.models import (
 )
 from src.core.pipeline import TranslationPipeline, TranslationProgress
 from src.processors import ProcessorFactory
+from src.processors.format_agent import FormatAgent, FormatAgentConfig
 from src.translators import TranslatorFactory
 from src.translators.fallback_translator import FallbackTranslator
 from src.utils.cache import TranslationCache
@@ -105,8 +106,19 @@ def init_session_state():
         st.session_state.preprocessing_approved = False
     if "preprocessing_review_signature" not in st.session_state:
         st.session_state.preprocessing_review_signature = None
+    if "preprocessing_retry_nonce" not in st.session_state:
+        st.session_state.preprocessing_retry_nonce = 0
     if "dark_mode" not in st.session_state:
         st.session_state.dark_mode = False  # Modo claro por defecto
+    if st.session_state.get("preprocessing_engine_version") != "mineru-structured-v3":
+        for document in st.session_state.documents:
+            if document.status == TranslationStatus.ERROR:
+                document.status = TranslationStatus.PENDING
+                document.error_message = ""
+                document.estimated_tokens = 0
+                document.sections = []
+                document.metadata.pop("layout_elements", None)
+        st.session_state.preprocessing_engine_version = "mineru-structured-v3"
 
 
 # =============================================================================
@@ -312,40 +324,52 @@ def main():
                 st.session_state.preprocessing_review_signature = selection_signature
                 st.session_state.preprocessed_exports = {}
 
+            failed_docs = [doc for doc in selected_docs if doc.status == TranslationStatus.ERROR]
+            if failed_docs and st.button(
+                "🔁 Reintentar procesamiento",
+                use_container_width=True,
+                key=f"retry_preprocessing_{st.session_state.preprocessing_retry_nonce}",
+            ):
+                for doc in failed_docs:
+                    doc.status = TranslationStatus.PENDING
+                    doc.error_message = ""
+                    doc.estimated_tokens = 0
+                    doc.sections = []
+                    doc.translated_tokens = 0
+                    doc.metadata.pop("preprocessed", None)
+                    doc.metadata.pop("layout_elements", None)
+                st.session_state.preprocessing_retry_nonce += 1
+                st.rerun()
+
             # Primero procesar aquellos que no tienen tokens estimados
             analysis_status = st.empty()
-            analysis_log = st.empty()
-            analysis_events = []
-
-            def add_analysis_event(message: str) -> None:
-                analysis_events.append(message)
-                analysis_log.code("\n".join(analysis_events), language="text")
 
             with st.spinner("📊 Analizando documentos..."):
                 for doc in selected_docs:
-                    if doc.estimated_tokens == 0 and doc.status == TranslationStatus.PENDING:
+                    needs_preprocessing = (
+                        not doc.metadata.get("preprocessed")
+                        or (doc.file_type == FileType.PDF and not doc.metadata.get("layout_elements"))
+                    )
+                    if needs_preprocessing and doc.status == TranslationStatus.PENDING:
                         analysis_status.info(
                             f'🤖 Agente procesador: procesando documento "{doc.filename}"'
                         )
-                        add_analysis_event(f"[ANALIZANDO] {doc.filename}: iniciando extracción")
                         try:
-                            processor = ProcessorFactory.get_processor(doc.file_type)
                             doc.status = TranslationStatus.LOADING
-                            doc = processor.process(doc)
+                            if doc.file_type == FileType.PDF:
+                                doc = FormatAgent(
+                                    FormatAgentConfig(mode="local", require_mineru=True)
+                                ).process(doc)
+                            else:
+                                processor = ProcessorFactory.get_processor(doc.file_type)
+                                doc = processor.process(doc)
+                            doc.metadata["preprocessed"] = True
                             doc.status = TranslationStatus.LOADED
-                            add_analysis_event(
-                                f"[COMPLETADO] {doc.filename}: {doc.estimated_tokens:,} tokens estimados"
-                            )
                         except Exception as e:
                             doc.status = TranslationStatus.ERROR
                             doc.error_message = str(e)
                             logger.error(f"Error pre-procesando {doc.filename}: {e}")
-                            add_analysis_event(f"[ERROR] {doc.filename}: {e}")
-
-            if analysis_events:
-                analysis_status.success("✅ Agente procesador: análisis finalizado")
-                with st.expander("📜 Registro del agente procesador", expanded=True):
-                    st.code("\n".join(analysis_events), language="text")
+                analysis_status.empty()
 
             # Punto de control manual entre extracción y traducción.
             st.divider()
@@ -359,7 +383,12 @@ def main():
             for doc in selected_docs:
                 if doc.status == TranslationStatus.ERROR:
                     preprocessing_errors.append(doc.filename)
-                    st.error(f'❌ "{doc.filename}" no pudo procesarse: {doc.error_message}')
+                    st.error(
+                        f'❌ "{doc.filename}" no pudo procesarse: '
+                        f'{doc.error_message or "error desconocido"}. '
+                        "MinerU es obligatorio en esta ruta; no se usará el extractor local. "
+                        "Pulsa Reintentar procesamiento cuando la conexión con MinerU esté disponible."
+                    )
                     continue
 
                 extracted_text = doc.full_original_text.strip()
@@ -367,6 +396,10 @@ def main():
                     f"📄 {doc.filename} | {len(doc.sections)} secciones | "
                     f"{doc.estimated_tokens:,} tokens estimados"
                 ):
+                    st.caption(
+                        f"Extractor: {doc.metadata.get('layout_backend', 'procesador estándar')} | "
+                        f"Elementos estructurados: {len(doc.metadata.get('layout_elements', []))}"
+                    )
                     st.text_area(
                         "Texto extraído y ordenado",
                         value=extracted_text[:16000],
@@ -414,6 +447,7 @@ def main():
                         paths = exporter.export_all_formats(
                             doc,
                             formats=["txt", "docx", "pdf", "latex"],
+                            original_only=True,
                         )
                         if paths:
                             preprocessed_exports[doc.filename] = paths
@@ -499,28 +533,17 @@ def main():
                         global_progress_bar = progress_container.progress(0)
                         global_status_text = progress_container.empty()
                         agent_status_text = progress_container.empty()
-                        agent_events = []
-                        agent_events_lock = threading.Lock()
-
-                        def add_agent_event(message: str) -> None:
-                            # Este callback corre en workers; no actualiza widgets.
-                            with agent_events_lock:
-                                agent_events.append(message)
 
                         # Callbacks de progreso
                         def doc_progress(progress: TranslationProgress):
                             phase = progress.status.value
+                            detail = f"{progress.filename}: {phase}"
+                            if progress.total_chunks:
+                                detail += f" ({progress.current_chunk}/{progress.total_chunks})"
                             if progress.status == TranslationStatus.ERROR:
-                                add_agent_event(
-                                    f"[ERROR] {progress.filename}: {progress.error_message or 'error no especificado'}"
-                                )
+                                agent_status_text.error(detail)
                             else:
-                                detail = f"fase={phase}"
-                                if progress.total_chunks:
-                                    detail += f" ({progress.current_chunk}/{progress.total_chunks} chunks)"
-                                # Solo conservar cambios de fase y checkpoints de chunks.
-                                if not progress.total_chunks or progress.current_chunk in (0, progress.total_chunks):
-                                    add_agent_event(f"[{phase.upper()}] {progress.filename}: {detail}")
+                                agent_status_text.info(detail)
                             logger.debug(
                                 f"Progreso {progress.filename}: "
                                 f"{phase} - {progress.progress*100:.0f}%"
@@ -529,8 +552,8 @@ def main():
                         def global_progress(prog: float, completed: int, total: int):
                             # El pipeline llama este callback desde un worker.
                             # La UI se actualiza solo en el hilo principal.
-                            add_agent_event(
-                                f"[PROGRESO] {completed}/{total} documentos completados"
+                            agent_status_text.info(
+                                f"Traducción: {completed}/{total} documentos completados"
                             )
 
                         # Ejecutar traducción
@@ -545,12 +568,7 @@ def main():
                             st.session_state.translated_docs = translated
                             st.session_state.translations_started = False
 
-                            with agent_events_lock:
-                                completed_events = list(agent_events)
-                            if completed_events:
-                                agent_status_text.success("✅ Agente traductor: proceso finalizado")
-                                with progress_container.expander("📜 Registro del agente traductor"):
-                                    st.code("\n".join(completed_events), language="text")
+                            agent_status_text.empty()
 
                             success_count = sum(
                                 1 for d in translated
@@ -581,11 +599,7 @@ def main():
                             st.error(f"❌ Error durante la traducción: {str(e)}")
                             global_progress_bar.progress(0)
                             global_status_text.error("❌ La traducción se detuvo por un error")
-                            with agent_events_lock:
-                                failed_events = list(agent_events)
-                            if failed_events:
-                                with progress_container.expander("📜 Registro del agente traductor", expanded=True):
-                                    st.code("\n".join(failed_events), language="text")
+                            agent_status_text.error("La traducción se detuvo por un error")
                             logger.exception("Error en pipeline de traducción")
 
             except Exception as e:

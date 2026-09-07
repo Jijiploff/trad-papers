@@ -95,36 +95,18 @@ class GeminiTranslator(BaseTranslator):
         """Inicializa el cliente de Gemini de forma lazy."""
         if self._model_instance is None:
             try:
-                import google.generativeai as genai
-                from google.generativeai.types import GenerationConfig
+                from google import genai
+                from google.genai import types
 
-                genai.configure(api_key=self.api_key)
-
-                generation_config = GenerationConfig(
-                    temperature=self.temperature,
-                    top_p=0.95,
-                    top_k=40,
-                    max_output_tokens=8192,
-                )
-
-                safety_settings = [
-                    {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
-                    {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
-                    {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
-                    {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
-                ]
-
-                self._model_instance = genai.GenerativeModel(
-                    model_name=self.model,
-                    generation_config=generation_config,
-                    safety_settings=safety_settings,
-                    system_instruction=self.SYSTEM_PROMPT,
+                self._model_instance = genai.Client(
+                    api_key=self.api_key,
+                    http_options=types.HttpOptions(api_version="v1beta"),
                 )
 
             except ImportError:
                 raise TranslationError(
-                    "El paquete 'google-generativeai' no está instalado. "
-                    "Instálalo con: pip install google-generativeai>=0.8.0"
+                    "El paquete 'google-genai' no está instalado. "
+                    "Instálalo con: pip install google-genai"
                 )
         return self._model_instance
 
@@ -144,6 +126,7 @@ class GeminiTranslator(BaseTranslator):
 
         try:
             model = self._get_model()
+            from google.genai import types
 
             user_prompt = (
                 f"Traduce el siguiente texto académico del inglés al español.\n\n"
@@ -154,7 +137,8 @@ class GeminiTranslator(BaseTranslator):
                 f"4. NO traduzcas nombres de secciones si están en comandos LaTeX como \\section{{...}}\n"
                 f"5. Mantén la terminología técnica precisa\n"
                 f"6. Mantén los saltos de línea y estructura de párrafos\n"
-                f"7. DEVUELVE SOLO LA TRADUCCIÓN, sin comentarios ni explicaciones\n\n"
+                f"7. Conserva exactamente los marcadores <<<ELEMENT_N>>> y su orden si aparecen\n"
+                f"8. DEVUELVE SOLO LA TRADUCCIÓN, sin comentarios ni explicaciones\n\n"
                 f"TEXTO A TRADUCIR:\n{text}"
             )
 
@@ -162,7 +146,17 @@ class GeminiTranslator(BaseTranslator):
             # llamar y descubrir un 429 después.
             self._throttle()
 
-            response = model.generate_content(user_prompt)
+            response = model.models.generate_content(
+                model=self.model,
+                contents=user_prompt,
+                config=types.GenerateContentConfig(
+                    temperature=self.temperature,
+                    top_p=0.95,
+                    top_k=40,
+                    max_output_tokens=8192,
+                    system_instruction=self.SYSTEM_PROMPT,
+                ),
+            )
 
             # Verificar si la respuesta fue bloqueada por seguridad
             if not response.candidates:

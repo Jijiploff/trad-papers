@@ -38,7 +38,7 @@ class DocumentExporter:
             return f"{base}_{suffix}_{timestamp}.{ext}"
         return f"{base}_{timestamp}.{ext}"
 
-    def export_to_txt(self, document: Document, output_dir: Optional[Path] = None) -> Path:
+    def export_to_txt(self, document: Document, output_dir: Optional[Path] = None, original_only: bool = False) -> Path:
         """Exporta la traducción a un archivo de texto plano."""
         output_dir = output_dir or self.export_dir
         filename = self._generate_filename(document, suffix="traducido", ext="txt")
@@ -55,7 +55,7 @@ class DocumentExporter:
             if section.title:
                 lines.append(f"=== {section.title.upper()} ===")
                 lines.append("")
-            if section.translated_text:
+            if section.translated_text and not original_only:
                 lines.append(section.translated_text)
             else:
                 lines.append(section.original_text)
@@ -68,7 +68,7 @@ class DocumentExporter:
         logger.info(f"Exportado TXT: {output_path}")
         return output_path
 
-    def export_to_pdf(self, document: Document, output_dir: Optional[Path] = None) -> Path:
+    def export_to_pdf(self, document: Document, output_dir: Optional[Path] = None, original_only: bool = False) -> Path:
         """
         Exporta la traducción a PDF con formato académico.
         Usa reportlab para generar PDF nativo sin dependencias externas.
@@ -78,7 +78,8 @@ class DocumentExporter:
             from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
             from reportlab.lib.units import inch
             from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_JUSTIFY
-            from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak, KeepTogether
+            from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak, KeepTogether, Table, TableStyle
+            from reportlab.lib import colors
             from reportlab.pdfbase import pdfmetrics
             from reportlab.pdfbase.ttfonts import TTFont
             from reportlab.lib.fonts import addMapping
@@ -147,12 +148,30 @@ class DocumentExporter:
         # Portada
         story.append(Paragraph(f"<b>{Path(document.filename).stem}</b>", title_style))
         story.append(Spacer(1, 0.25 * inch))
-        story.append(Paragraph("Documento Traducido Automáticamente", meta_style))
+        if original_only:
+            document_label = "Documento preprocesado con MinerU"
+        else:
+            document_label = "Documento Traducido Automáticamente"
+        story.append(Paragraph(document_label, meta_style))
         story.append(Spacer(1, 0.1 * inch))
         story.append(Paragraph(f"Fecha: {datetime.now().strftime('%d de %B de %Y')}", meta_style))
         story.append(Spacer(1, 0.1 * inch))
-        story.append(Paragraph(f"Motor: {document.provider_used.value.upper() if document.provider_used else 'N/A'}", meta_style))
+        engine = "MINERU" if original_only else (
+            document.provider_used.value.upper() if document.provider_used else "N/A"
+        )
+        story.append(Paragraph(f"Motor: {engine}", meta_style))
         story.append(PageBreak())
+
+        layout_elements = document.metadata.get("layout_elements", [])
+        if layout_elements:
+            for element in layout_elements:
+                self._append_layout_element(
+                    story, element, heading_style, body_style, colors, Table, TableStyle,
+                    original_only=original_only,
+                )
+            doc.build(story)
+            logger.info(f"Exportado PDF estructurado: {output_path}")
+            return output_path
 
         # Contenido
         for section in document.sections:
@@ -184,6 +203,65 @@ class DocumentExporter:
         logger.info(f"Exportado PDF: {output_path}")
         return output_path
 
+    @staticmethod
+    def _append_layout_element(story, element, heading_style, body_style, colors, Table, TableStyle, original_only=False):
+        """Renderiza un elemento sin convertir su estructura en texto corrido."""
+        from reportlab.platypus import Paragraph, Spacer
+
+        element_type = element.get("type", "paragraph")
+        content = (
+            element.get("content", "")
+            if original_only
+            else element.get("translated_content") or element.get("content", "")
+        )
+        if not content.strip():
+            return
+
+        from xml.sax.saxutils import escape
+
+        if element_type == "section_title":
+            story.append(Paragraph(escape(content), heading_style))
+            story.append(Spacer(1, 6))
+            return
+
+        if element_type == "table":
+            rows = []
+            for line in content.splitlines():
+                if set(line.replace("|", "").strip()) <= {"-", ":", " "}:
+                    continue
+                cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+                rows.append([Paragraph(escape(cell), body_style) for cell in cells])
+            if rows:
+                table = Table(rows, repeatRows=1, hAlign="LEFT")
+                table.setStyle(TableStyle([
+                    ("GRID", (0, 0), (-1, -1), 0.4, colors.grey),
+                    ("BACKGROUND", (0, 0), (-1, 0), colors.whitesmoke),
+                    ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                    ("LEFTPADDING", (0, 0), (-1, -1), 5),
+                    ("RIGHTPADDING", (0, 0), (-1, -1), 5),
+                ]))
+                story.append(table)
+                story.append(Spacer(1, 10))
+            return
+
+        if element_type == "equation":
+            story.append(Paragraph(f"<font name='Courier'>{escape(content).replace(chr(10), '<br/>')}</font>", body_style))
+            story.append(Spacer(1, 8))
+            return
+
+        if element_type == "figure":
+            story.append(Paragraph(f"<b>[Figura preservada]</b> {escape(content)}", body_style))
+            story.append(Spacer(1, 10))
+            return
+
+        if element_type == "reference":
+            story.append(Paragraph(escape(content), body_style))
+            story.append(Spacer(1, 4))
+            return
+
+        story.append(Paragraph(escape(content).replace("\n", "<br/>"), body_style))
+        story.append(Spacer(1, 6))
+
     def _export_pdf_via_docx(self, document: Document, output_dir: Optional[Path] = None) -> Path:
         """
         Método alternativo: Exporta a DOCX y luego convierte a PDF usando docx2pdf.
@@ -213,7 +291,7 @@ class DocumentExporter:
             logger.warning("No se pudo generar PDF. Se exportó como DOCX en su lugar.")
             return docx_path
 
-    def export_to_docx(self, document: Document, output_dir: Optional[Path] = None) -> Path:
+    def export_to_docx(self, document: Document, output_dir: Optional[Path] = None, original_only: bool = False) -> Path:
         """
         Exporta la traducción a DOCX con formato académico estándar.
         Incluye: portada, encabezados, cuerpo con estilos, citas preservadas.
@@ -274,7 +352,11 @@ class DocumentExporter:
             if not section.translated_text and not section.original_text:
                 continue
 
-            text = section.translated_text if section.translated_text else section.original_text
+            text = (
+                section.original_text
+                if original_only
+                else section.translated_text if section.translated_text else section.original_text
+            )
 
             # Determinar nivel de encabezado
             section_type = section.section_type.value
@@ -314,7 +396,7 @@ class DocumentExporter:
         logger.info(f"Exportado DOCX: {output_path}")
         return output_path
 
-    def export_to_latex(self, document: Document, output_dir: Optional[Path] = None) -> Path:
+    def export_to_latex(self, document: Document, output_dir: Optional[Path] = None, original_only: bool = False) -> Path:
         """Exporta la traducción preservando formato LaTeX cuando corresponde."""
         output_dir = output_dir or self.export_dir
         filename = self._generate_filename(document, suffix="traducido", ext="tex")
@@ -356,7 +438,11 @@ class DocumentExporter:
         }
 
         for section in document.sections:
-            text = section.translated_text if section.translated_text else section.original_text
+            text = (
+                section.original_text
+                if original_only
+                else section.translated_text if section.translated_text else section.original_text
+            )
             if not text.strip():
                 continue
 
@@ -403,7 +489,8 @@ class DocumentExporter:
         self, 
         document: Document, 
         output_dir: Optional[Path] = None,
-        formats: List[str] = ["txt", "docx", "pdf"]
+        formats: List[str] = ["txt", "docx", "pdf"],
+        original_only: bool = False,
     ) -> List[Path]:
         """
         Exporta el documento en múltiples formatos a la vez.
@@ -430,7 +517,7 @@ class DocumentExporter:
             fmt = fmt.lower().strip()
             if fmt in format_map:
                 try:
-                    path = format_map[fmt](document, output_dir)
+                    path = format_map[fmt](document, output_dir, original_only=original_only)
                     exported.append(path)
                 except Exception as e:
                     logger.error(f"Error exportando a {fmt}: {e}")

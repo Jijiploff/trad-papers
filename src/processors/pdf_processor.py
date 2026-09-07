@@ -106,7 +106,7 @@ class PdfProcessor(BaseFileProcessor):
 
                 # Extraer texto de cada página
                 for page in pdf.pages:
-                    page_text = page.extract_text() or ""
+                    page_text = self._extract_page_text(page)
                     self._pages_text.append(page_text)
 
                 # Detectar y eliminar encabezados y pies de página
@@ -118,6 +118,55 @@ class PdfProcessor(BaseFileProcessor):
             raise
         except Exception as e:
             raise CorruptedFileError(f"PDF corrupto o ilegible: {str(e)}")
+
+    def _extract_page_text(self, page) -> str:
+        """Ordena una página por columnas solo cuando la geometría es clara."""
+        words = page.extract_words(x_tolerance=2, y_tolerance=3, keep_blank_chars=False)
+        if not words:
+            return page.extract_text() or ""
+
+        lines: Dict[int, List[dict]] = {}
+        for word in words:
+            line_key = round(float(word["top"]) / 3) * 3
+            lines.setdefault(line_key, []).append(word)
+
+        ordered_lines = []
+        for top in sorted(lines):
+            line_words = sorted(lines[top], key=lambda word: float(word["x0"]))
+            ordered_lines.append((top, line_words))
+
+        left = [line for _, line in ordered_lines if line and float(line[0]["x0"]) < page.width * 0.48]
+        right = [line for _, line in ordered_lines if line and float(line[0]["x0"]) >= page.width * 0.48]
+        left_words = sum(len(line) for line in left)
+        right_words = sum(len(line) for line in right)
+        has_two_columns = (
+            page.width > 400
+            and left_words >= 12
+            and right_words >= 12
+            and abs(left_words - right_words) / max(left_words, right_words) < 0.9
+        )
+
+        def line_text(line: List[dict]) -> str:
+            return " ".join(word["text"] for word in line)
+
+        if not has_two_columns:
+            return "\n".join(line_text(line) for _, line in ordered_lines)
+
+        full_width = [
+            (top, line) for top, line in ordered_lines
+            if line and float(line[-1]["x1"]) - float(line[0]["x0"]) >= page.width * 0.65
+        ]
+        full_width_tops = {top for top, _ in full_width}
+        column_start = min(
+            (top for top, _ in ordered_lines if top not in full_width_tops),
+            default=0,
+        )
+        preamble = [line_text(line) for top, line in full_width if top < column_start]
+        body = [
+            line_text(line) for top, line in left + right
+            if top not in full_width_tops
+        ]
+        return "\n".join(preamble + body)
 
     def _extract_with_pypdf(self, pdf_bytes: io.BytesIO) -> str:
         from PyPDF2 import PdfReader

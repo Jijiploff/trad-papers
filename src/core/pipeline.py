@@ -16,9 +16,11 @@ from src.core.models import (
     TranslationProvider,
 )
 from src.processors import ProcessorFactory
+from src.processors.format_agent import FormatAgent, FormatAgentConfig
 from src.translators import TranslatorFactory
 from src.translators.base import BaseTranslator
 from src.utils.chunker import chunk_document_sections, ChunkingConfig
+from src.utils.chunker import estimate_tokens
 from src.utils.cache import TranslationCache
 from src.utils.logger import get_logger
 
@@ -100,8 +102,11 @@ class TranslationPipeline:
             _report(TranslationStatus.LOADING, 0.05)
             document.status = TranslationStatus.LOADING
 
-            processor = ProcessorFactory.get_processor(document.file_type)
-            document = processor.process(document)
+            if document.file_type.value == "pdf" and not document.metadata.get("preprocessed"):
+                document = FormatAgent(FormatAgentConfig(mode="local")).process(document)
+            elif document.file_type.value != "pdf":
+                processor = ProcessorFactory.get_processor(document.file_type)
+                document = processor.process(document)
             document.status = TranslationStatus.LOADED
             _report(TranslationStatus.LOADED, 0.1)
 
@@ -114,7 +119,83 @@ class TranslationPipeline:
                     _report(TranslationStatus.CACHED, 1.0)
                     return document
 
-            # 3. Chunking
+            # 3. Traducción estructurada para PDFs extraídos por MinerU.
+            # Solo se envían elementos marcados como traducibles; el exportador
+            # vuelve a colocarlos en el orden original junto a tablas, figuras,
+            # ecuaciones y referencias intactas.
+            layout_elements = document.metadata.get("layout_elements", [])
+            if layout_elements:
+                _report(TranslationStatus.TRANSLATING, 0.2, total_chunks=len(layout_elements))
+                document.status = TranslationStatus.TRANSLATING
+                translatable = [element for element in layout_elements if element.get("translatable")]
+                completed_elements = 0
+                max_batch_elements = 20
+                max_batch_tokens = 2800
+                batches = []
+                current_batch = []
+                current_tokens = 0
+                for element in translatable:
+                    element_tokens = estimate_tokens(element.get("content", "")) + 12
+                    if current_batch and (
+                        len(current_batch) >= max_batch_elements
+                        or current_tokens + element_tokens > max_batch_tokens
+                    ):
+                        batches.append(current_batch)
+                        current_batch = []
+                        current_tokens = 0
+                    current_batch.append(element)
+                    current_tokens += element_tokens
+                if current_batch:
+                    batches.append(current_batch)
+
+                for batch in batches:
+                    payload_parts = []
+                    batch_metadata = []
+                    for batch_index, element in enumerate(batch):
+                        protected_text, citation_placeholders = self._protect_citations(element["content"])
+                        protected_text, layout_placeholders = self._protect_layout(
+                            protected_text, element.get("type", "paragraph")
+                        )
+                        marker = f"<<<ELEMENT_{batch_index}>>>"
+                        payload_parts.append(f"{marker}\n{protected_text}")
+                        batch_metadata.append((marker, citation_placeholders, layout_placeholders))
+                    try:
+                        translated_payload = self.translator.translate_with_retry(
+                            "\n\n".join(payload_parts),
+                            source_lang=self.source_lang,
+                            target_lang=self.target_lang,
+                        )
+                        translations = self._split_structured_translation(translated_payload, batch_metadata)
+                        for element, translated, (_, citation_placeholders, layout_placeholders) in zip(
+                            batch, translations, batch_metadata
+                        ):
+                            translated = self._restore_layout(translated, layout_placeholders)
+                            element["translated_content"] = self._restore_citations(translated, citation_placeholders)
+                            element["translation_status"] = "translated"
+                    except Exception as exc:
+                        logger.error("Error traduciendo lote estructurado: %s", exc)
+                        for element in batch:
+                            element["translated_content"] = element["content"]
+                            element["translation_status"] = "error"
+                    completed_elements += len(batch)
+                    _report(
+                        TranslationStatus.TRANSLATING,
+                        min(0.95, 0.2 + 0.75 * completed_elements / max(1, len(translatable))),
+                        current_chunk=completed_elements,
+                        total_chunks=len(translatable),
+                    )
+
+                for section in document.sections:
+                    section.translated_text = section.original_text
+                document.translated_tokens = document.estimated_tokens
+                document.status = TranslationStatus.COMPLETED
+                document.progress = 1.0
+                document.completed_at = datetime.now()
+                document.provider_used = self._provider_enum(self.translator.get_provider_name())
+                _report(TranslationStatus.COMPLETED, 1.0)
+                return document
+
+            # 4. Chunking tradicional para formatos sin estructura MinerU.
             _report(TranslationStatus.CHUNKING, 0.15)
             document.status = TranslationStatus.CHUNKING
             document.chunks = chunk_document_sections(document.sections, self.chunking_config)
@@ -247,6 +328,81 @@ class TranslationPipeline:
             document.error_message = str(e)
             _report(TranslationStatus.ERROR, 0.0, error_message=str(e))
             raise
+
+    @staticmethod
+    def _protect_citations(text: str) -> tuple[str, Dict[str, str]]:
+        import re
+
+        patterns = [
+            r"\[[0-9][0-9,;\-–\s]*\]",
+            r"\([A-Z][^()]{0,80}?\b\d{4}[a-z]?\)",
+            r"\\cite[a-zA-Z]*\{[^}]+\}",
+            r"\\(?:ref|eqref|label)\{[^}]+\}",
+        ]
+        placeholders: Dict[str, str] = {}
+        counter = 0
+        combined = re.compile("|".join(f"(?:{pattern})" for pattern in patterns))
+
+        def replace(match):
+            nonlocal counter
+            token = f"__CITATION_{counter}__"
+            placeholders[token] = match.group(0)
+            counter += 1
+            return token
+
+        return combined.sub(replace, text), placeholders
+
+    @staticmethod
+    def _restore_citations(text: str, placeholders: Dict[str, str]) -> str:
+        for token, original in placeholders.items():
+            text = text.replace(token, original)
+        return text
+
+    @staticmethod
+    def _protect_layout(text: str, element_type: str) -> tuple[str, Dict[str, str]]:
+        """Protege sintaxis Markdown que define el formato, no el contenido."""
+        if element_type != "table":
+            return text, {}
+        placeholders = {
+            "__TABLE_NEWLINE__": "\n",
+            "__TABLE_PIPE__": "|",
+        }
+        protected = text.replace("|", "__TABLE_PIPE__").replace("\n", "__TABLE_NEWLINE__")
+        return protected, placeholders
+
+    @staticmethod
+    def _restore_layout(text: str, placeholders: Dict[str, str]) -> str:
+        for token, original in placeholders.items():
+            text = text.replace(token, original)
+        return text
+
+    @staticmethod
+    def _split_structured_translation(text: str, metadata: list) -> List[str]:
+        """Recupera cada traducción usando marcadores que no forman parte del formato."""
+        import re
+
+        positions = []
+        for marker, _, _ in metadata:
+            match = re.search(re.escape(marker), text)
+            if not match:
+                raise ValueError(f"Gemini no conservó el marcador {marker}")
+            positions.append(match)
+        translations = []
+        for index, match in enumerate(positions):
+            start = match.end()
+            end = positions[index + 1].start() if index + 1 < len(positions) else len(text)
+            content = text[start:end].strip()
+            if not content:
+                raise ValueError("Gemini devolvió un elemento vacío")
+            translations.append(content)
+        return translations
+
+    @staticmethod
+    def _provider_enum(provider_name: str) -> Optional[TranslationProvider]:
+        try:
+            return TranslationProvider(provider_name.replace("fallback->", ""))
+        except ValueError:
+            return TranslationProvider.GEMINI
 
     def _assemble_translations(self, document: Document) -> None:
         """

@@ -22,8 +22,11 @@ reportlab>=4.0.0
 # (no requiere paquetes adicionales para parsing básico)
 
 # --- Proveedores de traducción ---
-# Google Gemini (GRATIS - 1M tokens/día) - RECOMENDADO
-google-generativeai>=0.8.0
+# Google Gemini SDK (GRATIS - 1M tokens/día) - RECOMENDADO
+google-genai>=1.0.0
+
+# MinerU Open API (extracción Markdown ligera; Flash no requiere token)
+mineru-open-api>=0.5.9
 
 # OpenAI
 openai>=1.12.0,<2.0.0
