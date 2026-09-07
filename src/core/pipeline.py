@@ -103,7 +103,9 @@ class TranslationPipeline:
             document.status = TranslationStatus.LOADING
 
             if document.file_type.value == "pdf" and not document.metadata.get("preprocessed"):
-                document = FormatAgent(FormatAgentConfig(mode="local")).process(document)
+                document = FormatAgent(
+                    FormatAgentConfig(mode="local", require_mineru=True)
+                ).process(document)
             elif document.file_type.value != "pdf":
                 processor = ProcessorFactory.get_processor(document.file_type)
                 document = processor.process(document)
@@ -113,11 +115,22 @@ class TranslationPipeline:
             # 2. Verificar caché
             if self.cache:
                 cached = self.cache.get(document.content_hash, self.translator.get_provider_name())
-                if cached:
+                cached_layout = (cached or {}).get("metadata", {}).get("layout_elements") or []
+                current_layout = document.metadata.get("layout_elements") or []
+                cache_has_structured_translation = any(
+                    element.get("translatable") and element.get("translated_content")
+                    for element in cached_layout
+                )
+                if cached and (not current_layout or cache_has_structured_translation):
                     logger.info(f"Usando caché para: {filename}")
                     document = self.cache.restore_to_document(document, cached)
                     _report(TranslationStatus.CACHED, 1.0)
                     return document
+                if cached and current_layout and not cache_has_structured_translation:
+                    logger.info(
+                        "Caché ignorada para %s: no contiene traducción estructurada de MinerU",
+                        filename,
+                    )
 
             # 3. Traducción estructurada para PDFs extraídos por MinerU.
             # Solo se envían elementos marcados como traducibles; el exportador
@@ -185,13 +198,38 @@ class TranslationPipeline:
                         total_chunks=len(translatable),
                     )
 
-                for section in document.sections:
-                    section.translated_text = section.original_text
+                error_elements = sum(
+                    1 for element in translatable
+                    if element.get("translation_status") == "error"
+                )
+                self._apply_layout_to_sections(document)
+                document.provider_used = self._provider_enum(self.translator.get_provider_name())
                 document.translated_tokens = document.estimated_tokens
+
+                if translatable and error_elements == len(translatable):
+                    error_msg = (
+                        "Gemini no pudo traducir ningún elemento estructurado. "
+                        "Revisa la API key, el modelo y la cuota."
+                    )
+                    document.status = TranslationStatus.ERROR
+                    document.error_message = error_msg
+                    document.progress = 0.95
+                    _report(TranslationStatus.ERROR, document.progress, error_message=error_msg)
+                    return document
+
+                if self.cache:
+                    try:
+                        self.cache.put(document, self.translator.get_provider_name())
+                    except Exception as exc:
+                        logger.warning("No se pudo guardar en caché: %s", exc)
+
                 document.status = TranslationStatus.COMPLETED
                 document.progress = 1.0
                 document.completed_at = datetime.now()
-                document.provider_used = self._provider_enum(self.translator.get_provider_name())
+                if error_elements:
+                    document.error_message = (
+                        f"⚠️ {error_elements}/{len(translatable)} elementos no se pudieron traducir."
+                    )
                 _report(TranslationStatus.COMPLETED, 1.0)
                 return document
 
@@ -218,7 +256,6 @@ class TranslationPipeline:
             completed_chunks = 0
 
             def _translate_chunk(chunk: TranslationChunk) -> TranslationChunk:
-                nonlocal completed_chunks
                 try:
                     translated = self.translator.translate_with_retry(
                         chunk.text,
@@ -231,21 +268,10 @@ class TranslationPipeline:
                     logger.error(f"Error traduciendo chunk {chunk.chunk_id}: {e}")
                     chunk.status = TranslationStatus.ERROR
                     chunk.translated_text = f"[ERROR DE TRADUCCIÓN: {str(e)}]\n\n{chunk.text}"
-
-                completed_chunks += 1
-                base_progress = 0.2
-                translation_range = 0.75
-                chunk_progress = completed_chunks / total_chunks
-                overall = base_progress + (translation_range * chunk_progress)
-                _report(
-                    TranslationStatus.TRANSLATING,
-                    min(0.95, overall),
-                    current_chunk=completed_chunks,
-                    total_chunks=total_chunks,
-                )
                 return chunk
 
-            # Ejecutar en paralelo
+            # Ejecutar chunks en paralelo, pero reportar progreso solo en este
+            # hilo: Streamlit no admite actualizar widgets desde workers.
             with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
                 futures = [executor.submit(_translate_chunk, chunk) for chunk in document.chunks]
                 for future in as_completed(futures):
@@ -253,6 +279,14 @@ class TranslationPipeline:
                         future.result()
                     except Exception as e:
                         logger.error(f"Error en futuro de traducción: {e}")
+                    completed_chunks += 1
+                    overall = 0.2 + (0.75 * completed_chunks / total_chunks)
+                    _report(
+                        TranslationStatus.TRANSLATING,
+                        min(0.95, overall),
+                        current_chunk=completed_chunks,
+                        total_chunks=total_chunks,
+                    )
 
             # 4.1 Verificar cuántos chunks realmente fallaron. Antes esto no se
             #     comprobaba y el documento se marcaba como COMPLETADO (y se
@@ -404,6 +438,29 @@ class TranslationPipeline:
         except ValueError:
             return TranslationProvider.GEMINI
 
+    @staticmethod
+    def _apply_layout_to_sections(document: Document) -> None:
+        """Copia las traducciones estructuradas a las secciones de previsualización."""
+        elements = document.metadata.get("layout_elements") or []
+        if not elements:
+            return
+        replacements = []
+        for element in elements:
+            original = (element.get("content") or "").strip()
+            if not original:
+                continue
+            translated = original
+            if element.get("translatable"):
+                translated = (element.get("translated_content") or original).strip() or original
+            replacements.append((original, translated))
+        replacements.sort(key=lambda item: len(item[0]), reverse=True)
+        for section in document.sections:
+            text = section.original_text
+            for original, translated in replacements:
+                if original and original in text:
+                    text = text.replace(original, translated)
+            section.translated_text = text
+
     def _assemble_translations(self, document: Document) -> None:
         """
         Ensambla los chunks traducidos de vuelta en sus secciones correspondientes.
@@ -468,7 +525,11 @@ class TranslationPipeline:
         global_progress_callback: Optional[Callable[[float, int, int], None]] = None,
     ) -> List[Document]:
         """
-        Procesa múltiples documentos en paralelo.
+        Procesa documentos uno tras otro en el hilo del llamador.
+
+        Streamlit no puede actualizar la interfaz desde un ThreadPoolExecutor;
+        además Gemini tiene un RPM bajo, así que traducir varios PDFs a la
+        vez suele agotar la cuota sin ganar tiempo.
 
         Args:
             documents: Lista de documentos a procesar
@@ -479,31 +540,18 @@ class TranslationPipeline:
             Lista de documentos procesados
         """
         total = len(documents)
-        completed = 0
         results: List[Document] = []
 
-        def _process_single(doc: Document) -> Document:
-            nonlocal completed
+        # Los documentos se procesan en este mismo hilo. Traducir cada PDF en
+        # un ThreadPoolExecutor hacía que Streamlit abortara al actualizar la
+        # UI (Missing ScriptRunContext) antes de enviar texto a Gemini.
+        for index, doc in enumerate(documents, start=1):
             try:
-                result = self.process_document(doc, doc_progress_callback)
-                return result
+                results.append(self.process_document(doc, doc_progress_callback))
             except Exception as e:
                 logger.error(f"Falló documento {doc.filename}: {e}")
-                return doc
-            finally:
-                completed += 1
-                if global_progress_callback:
-                    global_progress_callback(completed / total, completed, total)
-
-        # Usar workers limitados para no saturar
-        doc_workers = max(1, min(self.max_workers, total))
-
-        with ThreadPoolExecutor(max_workers=doc_workers) as executor:
-            futures = [executor.submit(_process_single, doc) for doc in documents]
-            for future in as_completed(futures):
-                try:
-                    results.append(future.result())
-                except Exception as e:
-                    logger.error(f"Error en futuro de documento: {e}")
+                results.append(doc)
+            if global_progress_callback:
+                global_progress_callback(index / total, index, total)
 
         return results

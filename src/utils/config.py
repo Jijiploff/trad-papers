@@ -28,6 +28,17 @@ DEFAULT_CONFIG = {
         "source_lang": "EN",
         "target_lang": "ES",
     },
+    "mineru": {
+        "timeout_per_chunk_seconds": 1800,
+        "retries": 3,
+        "pages_per_chunk": 20,
+        "require_mineru": True,
+    },
+    "docling": {
+        "enabled": True,
+        "timeout_seconds": 600,
+        "prefer_over_pdfplumber": True,
+    },
     "providers": {
         "openai": {
             "api_key": "",

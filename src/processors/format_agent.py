@@ -38,7 +38,12 @@ class FormatAgentConfig:
     max_words_per_request: int = 2800
     min_completeness_ratio: float = 0.90
     require_mineru: bool = True
-    mineru_retries: int = 2
+    mineru_retries: int = 3
+    mineru_timeout_seconds: int = 1800
+    mineru_pages_per_chunk: int = 20
+    docling_enabled: bool = True
+    docling_timeout_seconds: int = 600
+    docling_prefer_over_fallback: bool = True
 
 
 class FormatAgent:
@@ -84,21 +89,104 @@ class FormatAgent:
         return document
 
     def _extract_layout_text(self, document: Document, base: PdfProcessor) -> tuple[str, str]:
-        """Usa MinerU Open API; nunca sustituye MinerU silenciosamente."""
+        """Cadena de fallback estructurada: MinerU → Docling → pdfplumber."""
         mineru_text = self._try_mineru_open_api(document)
         if mineru_text:
             return mineru_text, "mineru-open-api-flash"
+
+        if self.config.docling_enabled:
+            docling_text = self._try_docling(document)
+            if docling_text:
+                return docling_text, "docling-ibm-structured"
+
         if self.config.require_mineru:
-            detail = document.metadata.get("mineru_error", "sin detalle devuelto por MinerU")
+            parts = []
+            mineru_err = document.metadata.get("mineru_error")
+            if mineru_err:
+                parts.append(f"MinerU: {mineru_err}")
+            docling_err = document.metadata.get("docling_error")
+            if docling_err and self.config.docling_enabled:
+                parts.append(f"Docling: {docling_err}")
+            detail = " | ".join(parts) if parts else "sin detalle"
             raise RuntimeError(
-                f"MinerU Open API no devolvió texto: {detail}. "
-                "Revisa que mineru-open-api esté instalado y que el comando "
-                "flash-extract pueda procesar este PDF. No se usará el extractor local."
+                f"No se pudo extraer texto estructurado. {detail}. "
+                "Revisa la conexión (MinerU), la instalación de docling o "
+                "desactiva `require_mineru` para usar pdfplumber como último recurso."
             )
+
+        if self.config.docling_prefer_over_fallback and self.config.docling_enabled:
+            pass
         return normalize_extracted_text(base.extract_text(document)), "pdfplumber-layout-fallback"
 
+    def _try_docling(self, document: Document) -> str:
+        """Extrae Markdown con Docling (IBM) de forma local, sin red."""
+        try:
+            from docling.document_converter import DocumentConverter
+        except ImportError as exc:
+            logger.error("Docling no disponible: %s", exc)
+            document.metadata["docling_error"] = f"docling no instalado: {exc}"
+            return ""
+
+        timeout_seconds = max(60, int(self.config.docling_timeout_seconds))
+
+        try:
+            with tempfile.TemporaryDirectory(prefix="paper_docling_") as temp_dir:
+                temp_pdf = Path(temp_dir) / f"input_{document.doc_id or 'doc'}.pdf"
+                with open(temp_pdf, "wb") as handle:
+                    handle.write(document.content)
+
+                logger.info(
+                    "Docling procesando %s (%s bytes, timeout %ss)",
+                    document.filename,
+                    len(document.content),
+                    timeout_seconds,
+                )
+                start = time.time()
+
+                converter_holder: Dict[str, Any] = {}
+                markdown_holder: Dict[str, Any] = {}
+
+                def _run_convert():
+                    converter = DocumentConverter()
+                    result = converter.convert(temp_pdf)
+                    markdown_holder["md"] = result.document.export_to_markdown()
+
+                thread = threading.Thread(target=_run_convert, daemon=True)
+                thread.start()
+                thread.join(timeout=timeout_seconds)
+
+                elapsed = time.time() - start
+                if thread.is_alive():
+                    detail = (
+                        f"Docling timeout tras {elapsed:.0f}s "
+                        f"(límite configurado {timeout_seconds}s)"
+                    )
+                    document.metadata["docling_error"] = detail
+                    logger.warning("Docling timeout %s: %s", document.filename, detail)
+                    return ""
+
+                markdown = (markdown_holder.get("md") or "").strip()
+                if not markdown:
+                    detail = "Docling no devolvió texto"
+                    document.metadata["docling_error"] = detail
+                    logger.warning("Docling vacío %s", document.filename)
+                    return ""
+
+                logger.info(
+                    "Docling OK para %s: %.1fs, %s caracteres",
+                    document.filename,
+                    elapsed,
+                    len(markdown),
+                )
+                return markdown
+        except Exception as exc:
+            detail = f"{type(exc).__name__}: {exc}"
+            logger.error("Docling excepción %s: %s", document.filename, detail)
+            document.metadata["docling_error"] = detail[-1000:]
+        return ""
+
     def _try_mineru_open_api(self, document: Document) -> str:
-        """Extrae Markdown con MinerU Flash, cortando PDFs en bloques de 20 páginas."""
+        """Extrae Markdown con MinerU Flash, cortando PDFs en bloques de páginas configurables."""
         try:
             from mineru_open_api._cli import _get_binary_path
             from PyPDF2 import PdfReader, PdfWriter
@@ -107,16 +195,21 @@ class FormatAgent:
             document.metadata["mineru_error"] = str(exc)
             return ""
 
+        pages_per_chunk = max(1, int(self.config.mineru_pages_per_chunk))
+        timeout_seconds = max(60, int(self.config.mineru_timeout_seconds))
+
         try:
             with tempfile.TemporaryDirectory(prefix="paper_mineru_") as temp_dir:
                 reader = PdfReader(__import__("io").BytesIO(document.content))
-                page_ranges = range(0, len(reader.pages), 20)
+                total_pages = len(reader.pages)
+                page_ranges = list(range(0, total_pages, pages_per_chunk))
+                total_chunks = len(page_ranges)
                 binary = _get_binary_path()
                 markdown_parts = []
 
                 for part_index, start in enumerate(page_ranges):
                     writer = PdfWriter()
-                    for page in reader.pages[start:start + 20]:
+                    for page in reader.pages[start:start + pages_per_chunk]:
                         writer.add_page(page)
                     chunk_path = Path(temp_dir) / f"part_{part_index:04d}.pdf"
                     with chunk_path.open("wb") as handle:
@@ -124,14 +217,57 @@ class FormatAgent:
 
                     result = None
                     for attempt in range(self.config.mineru_retries + 1):
-                        result = subprocess.run(
-                            [binary, "flash-extract", str(chunk_path)],
-                            capture_output=True,
-                            text=True,
-                            encoding="utf-8",
-                            errors="replace",
-                            timeout=900,
-                        )
+                        try:
+                            result = subprocess.run(
+                                [binary, "flash-extract", str(chunk_path)],
+                                capture_output=True,
+                                text=True,
+                                encoding="utf-8",
+                                errors="replace",
+                                timeout=timeout_seconds,
+                            )
+                        except subprocess.TimeoutExpired as exc:
+                            result = None
+                            detail = (
+                                f"timeout tras {exc.timeout}s al subir el PDF a MinerU "
+                                f"(chunk {part_index + 1}/{total_chunks}, "
+                                f"páginas {start + 1}-{min(start + pages_per_chunk, total_pages)})"
+                            )
+                            document.metadata["mineru_error"] = detail
+                            logger.warning(
+                                "MinerU timeout %s/%s para %s chunk %s/%s: %s",
+                                attempt + 1,
+                                self.config.mineru_retries + 1,
+                                document.filename,
+                                part_index + 1,
+                                total_chunks,
+                                detail,
+                            )
+                            if attempt == self.config.mineru_retries:
+                                raise RuntimeError(detail)
+                            time.sleep(2 ** attempt)
+                            continue
+                        except OSError as exc:
+                            result = None
+                            detail = (
+                                f"error ejecutando MinerU (chunk {part_index + 1}/{total_chunks}, "
+                                f"páginas {start + 1}-{min(start + pages_per_chunk, total_pages)}): {exc}"
+                            )
+                            document.metadata["mineru_error"] = detail
+                            logger.warning(
+                                "MinerU error %s/%s para %s chunk %s/%s: %s",
+                                attempt + 1,
+                                self.config.mineru_retries + 1,
+                                document.filename,
+                                part_index + 1,
+                                total_chunks,
+                                detail,
+                            )
+                            if attempt == self.config.mineru_retries:
+                                raise RuntimeError(detail)
+                            time.sleep(2 ** attempt)
+                            continue
+
                         if result.returncode == 0 and result.stdout.strip():
                             break
                         detail = (result.stderr or result.stdout or "sin respuesta").strip()
@@ -143,6 +279,10 @@ class FormatAgent:
                             document.filename,
                             detail,
                         )
+                        if attempt == self.config.mineru_retries:
+                            break
+                        time.sleep(2 ** attempt)
+
                     markdown = result.stdout.strip() if result and result.returncode == 0 else ""
                     if markdown:
                         markdown_parts.append(markdown)

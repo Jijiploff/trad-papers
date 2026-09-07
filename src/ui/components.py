@@ -207,64 +207,80 @@ def _render_preview_panel(title: str, text: str, panel_class: str, height: str) 
 
 def render_side_by_side_preview(document: Document) -> None:
     """Renderiza un panel dividido con el texto original y la traducción."""
-    if not document.sections:
+    if not document.sections and not document.metadata.get("layout_elements"):
         st.warning("⚠️ Este documento no tiene secciones para previsualizar.")
         return
 
     st.subheader(f"🔍 Previsualización: {document.filename}")
 
-    # Navegación por secciones
+    layout_elements = document.metadata.get("layout_elements") or []
     section_options = []
     for section in document.sections:
         label = section.title or section.section_type.value.capitalize()
         section_options.append((section.section_id, label))
 
-    if not section_options:
-        return
+    if layout_elements:
+        original_text = "\n\n".join(
+            element.get("content", "") for element in layout_elements if element.get("content")
+        )
+        translated_parts = []
+        for element in layout_elements:
+            content = element.get("content", "")
+            if not content:
+                continue
+            if element.get("translatable"):
+                translated_parts.append(element.get("translated_content") or content)
+            else:
+                translated_parts.append(content)
+        translated_text = "\n\n".join(translated_parts) or "*[Aún no traducido]*"
+        st.caption(
+            "Vista del documento estructurado: se traduce el texto corrido y se conservan "
+            "tablas, figuras, ecuaciones y referencias en su forma original."
+        )
+    else:
+        if not section_options:
+            return
+        section_ids = [s[0] for s in section_options]
+        section_labels = [s[1] for s in section_options]
 
-    # Selector de sección
-    section_ids = [s[0] for s in section_options]
-    section_labels = [s[1] for s in section_options]
+        # Inicializar sección seleccionada
+        if f"active_section_{document.doc_id}" not in st.session_state:
+            st.session_state[f"active_section_{document.doc_id}"] = section_ids[0]
 
-    # Inicializar sección seleccionada
-    if f"active_section_{document.doc_id}" not in st.session_state:
-        st.session_state[f"active_section_{document.doc_id}"] = section_ids[0]
+        # Botones de navegación - más compactos
+        st.markdown('<div class="section-nav">', unsafe_allow_html=True)
 
-    # Botones de navegación - más compactos
-    st.markdown('<div class="section-nav">', unsafe_allow_html=True)
+        # Mostrar botones en filas de 8 para que ocupen menos espacio
+        cols_per_row = 8
+        for i in range(0, len(section_ids), cols_per_row):
+            cols = st.columns(min(cols_per_row, len(section_ids) - i))
+            for j, (sec_id, label) in enumerate(zip(
+                section_ids[i:i+cols_per_row],
+                section_labels[i:i+cols_per_row]
+            )):
+                with cols[j]:
+                    is_active = st.session_state[f"active_section_{document.doc_id}"] == sec_id
+                    # Botones más pequeños
+                    if st.button(
+                        label[:20] + "..." if len(label) > 20 else label,  # Truncar nombres largos
+                        key=f"secbtn_{document.doc_id}_{sec_id}",
+                        use_container_width=True,
+                        type="primary" if is_active else "secondary",
+                    ):
+                        st.session_state[f"active_section_{document.doc_id}"] = sec_id
+                        st.rerun()
 
-    # Mostrar botones en filas de 8 para que ocupen menos espacio
-    cols_per_row = 8
-    for i in range(0, len(section_ids), cols_per_row):
-        cols = st.columns(min(cols_per_row, len(section_ids) - i))
-        for j, (sec_id, label) in enumerate(zip(
-            section_ids[i:i+cols_per_row],
-            section_labels[i:i+cols_per_row]
-        )):
-            with cols[j]:
-                is_active = st.session_state[f"active_section_{document.doc_id}"] == sec_id
-                # Botones más pequeños
-                if st.button(
-                    label[:20] + "..." if len(label) > 20 else label,  # Truncar nombres largos
-                    key=f"secbtn_{document.doc_id}_{sec_id}",
-                    use_container_width=True,
-                    type="primary" if is_active else "secondary",
-                ):
-                    st.session_state[f"active_section_{document.doc_id}"] = sec_id
-                    st.rerun()
+        st.markdown('</div>', unsafe_allow_html=True)
 
-    st.markdown('</div>', unsafe_allow_html=True)
+        # Obtener sección activa
+        active_id = st.session_state[f"active_section_{document.doc_id}"]
+        active_section = next((s for s in document.sections if s.section_id == active_id), None)
 
-    # Obtener sección activa
-    active_id = st.session_state[f"active_section_{document.doc_id}"]
-    active_section = next((s for s in document.sections if s.section_id == active_id), None)
+        if not active_section:
+            return
 
-    if not active_section:
-        return
-
-    # Panel side-by-side con scroll limitado
-    original_text = active_section.original_text
-    translated_text = active_section.translated_text or "*[Aún no traducido]*"
+        original_text = active_section.original_text
+        translated_text = active_section.translated_text or "*[Aún no traducido]*"
 
     # Opciones de visualización - más compactas
     view_mode = st.radio(

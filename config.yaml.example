@@ -41,6 +41,23 @@ translation:
   target_lang: "ES"                # Idioma destino
 
 # =============================================================================
+# Configuración de MinerU (extracción estructurada de PDFs)
+# =============================================================================
+mineru:
+  timeout_per_chunk_seconds: 1800  # Timeout por bloque de páginas (30 min)
+  retries: 3                       # Reintentos por bloque antes de fallar
+  pages_per_chunk: 20              # Páginas procesadas por bloque
+  require_mineru: true             # Si falla MinerU y Docling, no usar pdfplumber
+
+# =============================================================================
+# Configuración de Docling (IBM) - fallback local estructurado
+# =============================================================================
+docling:
+  enabled: true                    # Usar Docling si MinerU falla
+  timeout_seconds: 600             # Timeout por documento (10 min)
+  prefer_over_pdfplumber: true     # Preferir Docling sobre pdfplumber simple
+
+# =============================================================================
 # Proveedores de traducción (orden de prioridad: Gemini -> DeepL -> OpenAI)
 # =============================================================================
 providers:

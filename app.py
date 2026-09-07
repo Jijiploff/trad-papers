@@ -176,6 +176,8 @@ def main():
     max_files = app_cfg.get("max_files", 20)
     max_file_size_mb = app_cfg.get("max_file_size_mb", 50)
     translation_cfg = config.get("translation", {})
+    mineru_cfg = config.get("mineru", {})
+    docling_cfg = config.get("docling", {})
 
     # =========================================================================
     # Sidebar: Configuración
@@ -197,7 +199,7 @@ def main():
         st.divider()
 
         # Parámetros de traducción
-        st.subheader("📊 Parámetros")
+        st.subheader("📊 Parámetros traducción")
         chunk_size = st.slider(
             "Tamaño de fragmento (tokens)",
             min_value=1000,
@@ -215,6 +217,59 @@ def main():
             step=1,
             help="Número de traducciones simultáneas",
         )
+
+        st.divider()
+
+        # Parámetros de MinerU
+        st.subheader("🤖 MinerU (PDF - nube)")
+        mineru_timeout_min = st.slider(
+            "⏱️ Timeout por bloque (min)",
+            min_value=5,
+            max_value=120,
+            value=max(5, mineru_cfg.get("timeout_per_chunk_seconds", 1800) // 60),
+            step=5,
+            help="Tiempo máximo de espera por bloque de páginas en MinerU",
+        )
+        mineru_timeout_seconds = mineru_timeout_min * 60
+
+        mineru_retries = st.slider(
+            "🔁 Reintentos por bloque",
+            min_value=0,
+            max_value=10,
+            value=mineru_cfg.get("retries", 3),
+            step=1,
+            help="Número de reintentos por bloque antes de pasar al fallback",
+        )
+
+        mineru_pages_per_chunk = st.slider(
+            "📄 Páginas por bloque",
+            min_value=5,
+            max_value=50,
+            value=mineru_cfg.get("pages_per_chunk", 20),
+            step=5,
+            help="Número de páginas procesadas en cada bloque enviado a MinerU",
+        )
+
+        st.divider()
+
+        # Parámetros de Docling
+        st.subheader("🧠 Docling (IBM - local)")
+        docling_enabled = st.checkbox(
+            "✅ Habilitar Docling como fallback tras MinerU",
+            value=docling_cfg.get("enabled", True),
+            help="Si MinerU falla, procesa el PDF con Docling (local, ~300MB modelos descarga inicial)",
+        )
+
+        docling_timeout_min = st.slider(
+            "⏱️ Timeout Docling (min)",
+            min_value=2,
+            max_value=60,
+            value=max(2, docling_cfg.get("timeout_seconds", 600) // 60),
+            step=2,
+            disabled=not docling_enabled,
+            help="Tiempo máximo por documento al procesar con Docling",
+        )
+        docling_timeout_seconds = docling_timeout_min * 60
 
         st.divider()
 
@@ -352,18 +407,38 @@ def main():
                     )
                     if needs_preprocessing and doc.status == TranslationStatus.PENDING:
                         analysis_status.info(
-                            f'🤖 Agente procesador: procesando documento "{doc.filename}"'
+                            f'🤖 Agente procesador: procesando "{doc.filename}" '
+                            f'(MinerU {mineru_timeout_min}min/{mineru_retries}reint '
+                            f'| Docling {"ON" if docling_enabled else "OFF"} '
+                            f'{docling_timeout_min if docling_enabled else ""}min)'
                         )
                         try:
                             doc.status = TranslationStatus.LOADING
                             if doc.file_type == FileType.PDF:
                                 doc = FormatAgent(
-                                    FormatAgentConfig(mode="local", require_mineru=True)
+                                    FormatAgentConfig(
+                                        mode="local",
+                                        require_mineru=mineru_cfg.get("require_mineru", True),
+                                        mineru_retries=mineru_retries,
+                                        mineru_timeout_seconds=mineru_timeout_seconds,
+                                        mineru_pages_per_chunk=mineru_pages_per_chunk,
+                                        docling_enabled=docling_enabled,
+                                        docling_timeout_seconds=docling_timeout_seconds,
+                                        docling_prefer_over_fallback=docling_cfg.get(
+                                            "prefer_over_pdfplumber", True
+                                        ),
+                                    )
                                 ).process(doc)
                             else:
                                 processor = ProcessorFactory.get_processor(doc.file_type)
                                 doc = processor.process(doc)
                             doc.metadata["preprocessed"] = True
+                            doc.metadata["mineru_timeout_used"] = mineru_timeout_seconds
+                            doc.metadata["mineru_retries_used"] = mineru_retries
+                            doc.metadata["mineru_pages_per_chunk_used"] = mineru_pages_per_chunk
+                            doc.metadata["docling_enabled"] = docling_enabled
+                            if docling_enabled:
+                                doc.metadata["docling_timeout_used"] = docling_timeout_seconds
                             doc.status = TranslationStatus.LOADED
                         except Exception as e:
                             doc.status = TranslationStatus.ERROR
@@ -540,6 +615,7 @@ def main():
                             detail = f"{progress.filename}: {phase}"
                             if progress.total_chunks:
                                 detail += f" ({progress.current_chunk}/{progress.total_chunks})"
+                            global_progress_bar.progress(min(1.0, max(0.0, progress.progress)))
                             if progress.status == TranslationStatus.ERROR:
                                 agent_status_text.error(detail)
                             else:
@@ -550,9 +626,8 @@ def main():
                             )
 
                         def global_progress(prog: float, completed: int, total: int):
-                            # El pipeline llama este callback desde un worker.
-                            # La UI se actualiza solo en el hilo principal.
-                            agent_status_text.info(
+                            global_progress_bar.progress(min(1.0, max(0.0, prog)))
+                            global_status_text.info(
                                 f"Traducción: {completed}/{total} documentos completados"
                             )
 

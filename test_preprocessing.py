@@ -1,10 +1,11 @@
+import subprocess
 import unittest
 import tempfile
 from unittest.mock import patch
 from types import SimpleNamespace
 
 from src.processors.pdf_processor import PdfProcessor
-from src.processors.format_agent import FormatAgent
+from src.processors.format_agent import FormatAgent, FormatAgentConfig
 from src.processors.text_normalizer import normalize_extracted_text
 from src.core.pipeline import TranslationPipeline
 from src.core.models import Document, FileType, Section, SectionType, TranslationStatus
@@ -146,11 +147,46 @@ class TextNormalizationTests(unittest.TestCase):
 
     def test_format_agent_does_not_fallback_when_mineru_fails(self):
         document = Document("id", "article.pdf", FileType.PDF, 1, b"pdf")
-        agent = FormatAgent()
+        agent = FormatAgent(FormatAgentConfig(docling_enabled=False))
         with patch.object(agent, "_try_mineru_open_api", return_value=""):
             with self.assertRaises(RuntimeError) as error:
                 agent.process(document)
-        self.assertIn("No se usará el extractor local", str(error.exception))
+        self.assertIn("No se pudo extraer texto estructurado", str(error.exception))
+
+    def test_format_agent_retries_on_mineru_timeout(self):
+        document = Document("id", "article.pdf", FileType.PDF, 1, b"%PDF-1.4\n1 0 obj\n<<>>\nendobj\ntrailer\n<<>>\n%%EOF")
+        agent = FormatAgent(FormatAgentConfig(
+            mineru_retries=2,
+            mineru_timeout_seconds=1200,
+            docling_enabled=False,
+        ))
+
+        class DummyReader:
+            pages = [object()]
+
+        class DummyWriter:
+            def add_page(self, _page):
+                pass
+            def write(self, _handle):
+                pass
+
+        def fake_run(*args, **kwargs):
+            if not hasattr(fake_run, "calls"):
+                fake_run.calls = 0
+            fake_run.calls += 1
+            if fake_run.calls < 3:
+                raise subprocess.TimeoutExpired(cmd="flash-extract", timeout=1200)
+            return SimpleNamespace(returncode=0, stdout="# Hola\n\nTexto procesado.", stderr="")
+
+        with patch("PyPDF2.PdfReader", return_value=DummyReader()), \
+             patch("PyPDF2.PdfWriter", return_value=DummyWriter()), \
+             patch("src.processors.format_agent.subprocess.run", side_effect=fake_run), \
+             patch("src.processors.format_agent.time.sleep"):
+            result = agent._try_mineru_open_api(document)
+
+        self.assertIn("Hola", result)
+        self.assertIn("Texto procesado", result)
+        self.assertEqual(fake_run.calls, 3)
 
 
 if __name__ == "__main__":
