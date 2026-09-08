@@ -273,6 +273,30 @@ class TextNormalizationTests(unittest.TestCase):
         self.assertEqual(result.metadata["layout_backend"], "llamaparse")
         self.assertIn("Markdown Llama", result.full_original_text)
 
+    def test_process_sets_loaded_status_on_success(self):
+        """Tras un procesamiento exitoso el documento queda LOADED (no LOADING)."""
+        FormatAgent._backend_turn = 0
+        document = Document("id", "article.pdf", FileType.PDF, 1, b"%PDF-fake")
+        document.status = TranslationStatus.LOADING
+        agent = FormatAgent(FormatAgentConfig(llama_api_key="llx-test"))
+        with patch.object(agent, "_try_mineru_open_api", return_value=""), \
+             patch.object(agent, "_try_llama_parse", return_value="# Markdown Llama"):
+            result = agent.process(document)
+        self.assertEqual(result.status, TranslationStatus.LOADED)
+        self.assertTrue(result.sections)
+
+    def test_process_parallel_marks_error_when_both_backends_fail(self):
+        """Si MinerU y LlamaParse fallan, el documento queda ERROR y no LOADED."""
+        FormatAgent._backend_turn = 0
+        document = Document("id", "article.pdf", FileType.PDF, 1, b"%PDF-fake")
+        document.status = TranslationStatus.LOADING
+        agent = FormatAgent(FormatAgentConfig(llama_api_key="llx-test"))
+        with patch.object(agent, "_try_mineru_open_api", return_value=""), \
+             patch.object(agent, "_try_llama_parse", return_value=""):
+            result = agent.process_parallel([document])[0]
+        self.assertEqual(result.status, TranslationStatus.ERROR)
+        self.assertNotEqual(result.status, TranslationStatus.LOADED)
+
     def test_mineru_used_as_fallback_when_llama_fails(self):
         """LlamaParse primario falla; MinerU lo rescata."""
         FormatAgent._backend_turn = 1

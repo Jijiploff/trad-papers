@@ -11,11 +11,12 @@ import tempfile
 import threading
 import time
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 from pathlib import Path
 
-from src.core.models import Document, Section, SectionType
+from src.core.models import Document, Section, SectionType, TranslationStatus
 from src.processors.pdf_processor import PdfProcessor
 from src.processors.text_normalizer import normalize_extracted_text
 from src.utils.logger import get_logger
@@ -40,16 +41,17 @@ class FormatAgentConfig:
     min_completeness_ratio: float = 0.90
     require_mineru: bool = True
     mineru_enabled: bool = True
-    mineru_retries: int = 3
+    mineru_retries: int = 1
     mineru_timeout_seconds: int = 600
-    mineru_pages_per_chunk: int = 20
+    mineru_pages_per_chunk: int = 5
     mineru_max_pages: int = 20
-    mineru_max_file_size_mb: int = 10
+    mineru_max_file_size_mb: int = 5
     llama_enabled: bool = True
     llama_api_key: str = ""
     llama_tier: str = "cost_effective"
     llama_version: str = "latest"
     llama_timeout_seconds: int = 600
+    max_workers: int = 2
 
 
 class FormatAgent:
@@ -94,7 +96,50 @@ class FormatAgent:
         )
         document.metadata["format_agent"] = self.config.mode
         document.metadata["format_agent_model"] = self.config.model if self.config.mode == "gemini" else "local"
+        document.status = TranslationStatus.LOADED
         return document
+
+    def process_parallel(
+        self,
+        documents: List[Document],
+        max_workers: Optional[int] = None,
+        progress_callback: Optional[Callable[[int, int], None]] = None,
+    ) -> List[Document]:
+        """Procesa varios documentos en paralelo con un pool de hilos.
+
+        Un hilo se dedica a MinerU y otro a LlamaParse (backend primario
+        rotado por documento). Cada worker toma el siguiente documento de la
+        cola en cuanto termina el suyo, acelerando el lote. El callback de
+        progreso sólo se invoca desde el hilo principal (Streamlit).
+        """
+        workers = max(1, int(max_workers or self.config.max_workers))
+        results: Dict[str, Document] = {}
+        completed = 0
+        total = max(1, len(documents))
+        done_lock = threading.Lock()
+
+        def _work(doc: Document) -> Document:
+            try:
+                return self.process(doc)
+            except Exception as exc:
+                doc.status = TranslationStatus.ERROR
+                doc.error_message = str(exc)
+                logger.error("Error pre-procesando %s en worker: %s", doc.filename, exc)
+                return doc
+
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = {
+                executor.submit(_work, doc): doc.doc_id for doc in documents
+            }
+            for future in as_completed(futures):
+                doc = future.result()
+                results[doc.doc_id] = doc
+                with done_lock:
+                    completed += 1
+                if progress_callback:
+                    progress_callback(completed, total)
+
+        return [results[doc.doc_id] for doc in documents]
 
     def _extract_layout_text(self, document: Document, base: PdfProcessor) -> tuple[str, str]:
         """Cola estructurada MinerU ↔ LlamaParse con fallback mutuo.
@@ -268,10 +313,11 @@ class FormatAgent:
                         pending.insert(0, (start, mid))
                         logger.warning(
                             "MinerU división por peso real para %s: "
-                            "bloque págs. %s-%s supera %sMB; se parte en dos",
+                            "bloque págs. %s-%s = %.2f MB, supera %sMB; se parte en dos",
                             document.filename,
                             start + 1,
                             end,
+                            actual_size / (1024 * 1024),
                             self.config.mineru_max_file_size_mb,
                         )
                         continue
@@ -288,6 +334,15 @@ class FormatAgent:
                     )
                     if markdown:
                         markdown_parts.append(markdown)
+                    else:
+                        last_err = document.metadata.get("mineru_error", "")
+                        if any(kw in last_err.lower() for kw in ("deadline exceeded", "client.timeout", "timeout")):
+                            logger.warning(
+                                "MinerU abortando chunks restantes para %s: "
+                                "timeout de red detectado en chunk %s/%s",
+                                document.filename, seq, len(pending) + 1,
+                            )
+                            break
 
                 if markdown_parts:
                     return "\n\n".join(markdown_parts)
@@ -308,6 +363,11 @@ class FormatAgent:
         timeout_seconds: int,
     ) -> str:
         """Ejecuta MinerU Flash sobre un bloque de páginas con reintentos y backoff."""
+        chunk_size_mb = chunk_path.stat().st_size / (1024 * 1024) if chunk_path.exists() else 0
+        logger.info(
+            "MinerU upload %s chunk %s/%s: págs %s-%s (%.2f MB)",
+            document.filename, seq, total_chunks, start + 1, end, chunk_size_mb,
+        )
         result = None
         for attempt in range(self.config.mineru_retries + 1):
             try:
@@ -337,7 +397,7 @@ class FormatAgent:
                 )
                 if attempt == self.config.mineru_retries:
                     raise RuntimeError(detail)
-                time.sleep(2 ** attempt)
+                time.sleep(min(2 ** attempt, 2))
                 continue
             except OSError as exc:
                 result = None
@@ -357,7 +417,7 @@ class FormatAgent:
                 )
                 if attempt == self.config.mineru_retries:
                     raise RuntimeError(detail)
-                time.sleep(2 ** attempt)
+                time.sleep(min(2 ** attempt, 2))
                 continue
 
             if result.returncode == 0 and result.stdout.strip():
@@ -365,15 +425,28 @@ class FormatAgent:
             detail = (result.stderr or result.stdout or "sin respuesta").strip()
             document.metadata["mineru_error"] = detail[-1000:]
             logger.warning(
-                "MinerU intento %s/%s para %s: %s",
+                "MinerU intento %s/%s para %s chunk %s/%s (%.2f MB, pág %s-%s): %s",
                 attempt + 1,
                 self.config.mineru_retries + 1,
                 document.filename,
-                detail,
+                seq,
+                total_chunks,
+                chunk_size_mb,
+                start + 1,
+                end,
+                detail[-200:],
             )
+            is_network_timeout = any(kw in detail.lower() for kw in ("deadline exceeded", "client.timeout", "timeout"))
+            if is_network_timeout:
+                logger.warning(
+                    "MinerU timeout de red detectado en chunk %s/%s; "
+                    "sin reintentos adicionales (la red no se recuperará rápido)",
+                    seq, total_chunks,
+                )
+                break
             if attempt == self.config.mineru_retries:
                 break
-            time.sleep(2 ** attempt)
+            time.sleep(min(2 ** attempt, 2))
 
         return result.stdout.strip() if result and result.returncode == 0 else ""
 

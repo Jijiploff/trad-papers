@@ -30,11 +30,12 @@ DEFAULT_CONFIG = {
     },
     "mineru": {
         "timeout_per_chunk_seconds": 600,
-        "retries": 3,
-        "pages_per_chunk": 20,
+        "retries": 1,
+        "pages_per_chunk": 5,
         "max_pages": 20,
-        "max_file_size_mb": 10,
+        "max_file_size_mb": 5,
         "require_mineru": True,
+        "workers": 2,
     },
     "llama": {
         "api_key": "",

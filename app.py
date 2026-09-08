@@ -236,9 +236,18 @@ def main():
             "🔁 Reintentos por bloque",
             min_value=0,
             max_value=10,
-            value=mineru_cfg.get("retries", 3),
+            value=mineru_cfg.get("retries", 1),
             step=1,
             help="Número de reintentos por bloque antes de pasar al fallback",
+        )
+
+        mineru_workers = st.selectbox(
+            "🧵 Hilos de procesamiento",
+            options=[1, 2],
+            index=1,
+            help="Procesa documentos en paralelo: 1 hilo usa MinerU/LlamaParse "
+                 "alternados; 2 hilos dedican uno a MinerU y otro a LlamaParse "
+                 "simultáneamente (más rápido con varios archivos).",
         )
 
         mineru_pages_per_chunk = st.slider(
@@ -420,38 +429,70 @@ def main():
             analysis_status = st.empty()
 
             with st.spinner("📊 Analizando documentos..."):
-                for doc in selected_docs:
-                    needs_preprocessing = (
-                        not doc.metadata.get("preprocessed")
-                        or (doc.file_type == FileType.PDF and not doc.metadata.get("layout_elements"))
+                todo = [
+                    doc for doc in selected_docs
+                    if (not doc.metadata.get("preprocessed")
+                        or (doc.file_type == FileType.PDF and not doc.metadata.get("layout_elements")))
+                    and doc.status == TranslationStatus.PENDING
+                ]
+                if todo:
+                    analysis_status.info(
+                        f'🤖 Agente procesador: procesando {len(todo)} documentos '
+                        f'en paralelo (1 hilo MinerU + 1 hilo LlamaParse)'
                     )
-                    if needs_preprocessing and doc.status == TranslationStatus.PENDING:
-                        analysis_status.info(
-                            f'🤖 Agente procesador: procesando "{doc.filename}" '
-                            f'(cola MinerU↔LlamaParse {"ON" if llama_enabled else "OFF"})'
-                        )
+
+                    non_pdf = [doc for doc in todo if doc.file_type != FileType.PDF]
+                    for doc in non_pdf:
+                        doc.status = TranslationStatus.LOADING
                         try:
+                            processor = ProcessorFactory.get_processor(doc.file_type)
+                            doc = processor.process(doc)
+                            doc.status = TranslationStatus.LOADED
+                        except Exception as e:
+                            doc.status = TranslationStatus.ERROR
+                            doc.error_message = str(e)
+                            logger.error(f"Error pre-procesando {doc.filename}: {e}")
+
+                    pdf_docs = [doc for doc in todo if doc.file_type == FileType.PDF]
+                    if pdf_docs:
+                        for doc in pdf_docs:
                             doc.status = TranslationStatus.LOADING
-                            if doc.file_type == FileType.PDF:
-                                doc = FormatAgent(
-                                    FormatAgentConfig(
-                                        mode="local",
-                                        require_mineru=mineru_cfg.get("require_mineru", True),
-                                        mineru_retries=mineru_retries,
-                                        mineru_timeout_seconds=mineru_timeout_seconds,
-                                        mineru_pages_per_chunk=mineru_pages_per_chunk,
-                                        mineru_max_pages=mineru_max_pages,
-                                        mineru_max_file_size_mb=mineru_max_file_size_mb,
-                                        llama_enabled=llama_enabled,
-                                        llama_api_key=llama_cfg.get("api_key", ""),
-                                        llama_tier=llama_tier,
-                                        llama_version=llama_version,
-                                        llama_timeout_seconds=llama_timeout_seconds,
-                                    )
-                                ).process(doc)
+
+                        try:
+                            agent = FormatAgent(
+                                FormatAgentConfig(
+                                    mode="local",
+                                    max_workers=mineru_workers,
+                                    require_mineru=mineru_cfg.get("require_mineru", True),
+                                    mineru_retries=mineru_retries,
+                                    mineru_timeout_seconds=mineru_timeout_seconds,
+                                    mineru_pages_per_chunk=mineru_pages_per_chunk,
+                                    mineru_max_pages=mineru_max_pages,
+                                    mineru_max_file_size_mb=mineru_max_file_size_mb,
+                                    llama_enabled=llama_enabled,
+                                    llama_api_key=llama_cfg.get("api_key", ""),
+                                    llama_tier=llama_tier,
+                                    llama_version=llama_version,
+                                    llama_timeout_seconds=llama_timeout_seconds,
+                                )
+                            )
+                            processed = agent.process_parallel(pdf_docs, progress_callback=None)
+                        except Exception as e:
+                            logger.error(f"Error lanzando procesamiento en paralelo: {e}")
+                            processed = [doc for doc in pdf_docs if doc.status not in (TranslationStatus.LOADING,)]
+
+                        result_by_id = {doc.doc_id: doc for doc in processed}
+                        for doc in pdf_docs:
+                            res = result_by_id.get(doc.doc_id, doc)
+                            if res.status == TranslationStatus.ERROR:
+                                doc.status = TranslationStatus.ERROR
+                                doc.error_message = res.error_message or "error desconocido"
                             else:
-                                processor = ProcessorFactory.get_processor(doc.file_type)
-                                doc = processor.process(doc)
+                                doc.status = TranslationStatus.LOADED
+                            doc.metadata.update(res.metadata)
+                            doc.sections = res.sections
+                            doc.estimated_tokens = res.estimated_tokens
+                            doc.page_count = res.page_count
                             doc.metadata["preprocessed"] = True
                             doc.metadata["mineru_timeout_used"] = mineru_timeout_seconds
                             doc.metadata["mineru_retries_used"] = mineru_retries
@@ -463,11 +504,6 @@ def main():
                             doc.metadata["llama_version_used"] = llama_version
                             if llama_enabled:
                                 doc.metadata["llama_timeout_used"] = llama_timeout_seconds
-                            doc.status = TranslationStatus.LOADED
-                        except Exception as e:
-                            doc.status = TranslationStatus.ERROR
-                            doc.error_message = str(e)
-                            logger.error(f"Error pre-procesando {doc.filename}: {e}")
                 analysis_status.empty()
 
             # Punto de control manual entre extracción y traducción.
