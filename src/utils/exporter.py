@@ -1,16 +1,20 @@
 # exporter.py - Versión con exportación a PDF usando reportlab
+#                y LaTeX con escape de caracteres especiales + tablas reales
 
 """
 Módulo de exportación. Genera archivos traducidos en múltiples formatos:
 - TXT: texto plano
 - DOCX: formato Word con estilo académico
 - PDF: formato PDF con estilo académico
-- LaTeX: preservando estructura original
+- LaTeX: preservando estructura original, con escape de caracteres
+  especiales y conversión de tablas HTML (MinerU) a longtable/booktabs
 - ZIP: paquete consolidado de múltiples archivos
 """
 import os
+import re
 import zipfile
 import tempfile
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import List, Optional, Dict, Any
 from datetime import datetime
@@ -19,6 +23,68 @@ from src.core.models import Document, FileType
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+# =============================================================================
+# Utilidades para exportación a LaTeX
+# =============================================================================
+
+class _LatexHTMLTableParser(HTMLParser):
+    """
+    Parser HTML minimalista (sin dependencias externas) para extraer filas
+    y celdas de las tablas que produce MinerU, del tipo:
+    <table><tr><td>...</td><td>...</td></tr></table>
+    """
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.rows: List[List[str]] = []
+        self._row: Optional[List[str]] = None
+        self._cell_parts: Optional[List[str]] = None
+
+    def handle_starttag(self, tag, attrs):
+        if tag == "tr":
+            self._row = []
+        elif tag in ("td", "th"):
+            self._cell_parts = []
+        elif tag == "br" and self._cell_parts is not None:
+            self._cell_parts.append(" ")
+
+    def handle_endtag(self, tag):
+        if tag == "tr" and self._row is not None:
+            self.rows.append(self._row)
+            self._row = None
+        elif tag in ("td", "th") and self._cell_parts is not None:
+            text = re.sub(r"\s+", " ", "".join(self._cell_parts)).strip()
+            if self._row is not None:
+                self._row.append(text)
+            self._cell_parts = None
+
+    def handle_data(self, data):
+        if self._cell_parts is not None:
+            self._cell_parts.append(data)
+
+
+# Caracteres que LaTeX interpreta como comandos y deben escaparse.
+_LATEX_ESCAPE_RE = re.compile(r'[&%$#_{}~^\\]')
+_LATEX_ESCAPE_MAP = {
+    '&': r'\&',
+    '%': r'\%',
+    '$': r'\$',
+    '#': r'\#',
+    '_': r'\_',
+    '{': r'\{',
+    '}': r'\}',
+    '~': r'\textasciitilde{}',
+    '^': r'\textasciicircum{}',
+    '\\': r'\textbackslash{}',
+}
+# Detecta fragmentos matemáticos ($...$) para NO escaparlos como texto normal.
+_MATH_SPAN_RE = re.compile(r'\$[^$\n]{1,300}?\$')
+# Marca el borde entre el final de una fila markdown ("...| ") y el
+# principio de la siguiente ("| ...") cuando los saltos de línea se
+# perdieron y todo quedó en un solo párrafo.
+_TABLE_ROW_BOUNDARY_RE = re.compile(r'\|\s*\|')
 
 
 class DocumentExporter:
@@ -103,7 +169,7 @@ class DocumentExporter:
         )
 
         styles = getSampleStyleSheet()
-        
+
         # Crear estilos personalizados
         title_style = ParagraphStyle(
             'CustomTitle',
@@ -113,7 +179,7 @@ class DocumentExporter:
             spaceAfter=12,
             fontName='Helvetica-Bold',
         )
-        
+
         heading_style = ParagraphStyle(
             'CustomHeading',
             parent=styles['Heading1'],
@@ -123,7 +189,7 @@ class DocumentExporter:
             spaceBefore=12,
             fontName='Helvetica-Bold',
         )
-        
+
         body_style = ParagraphStyle(
             'CustomBody',
             parent=styles['Normal'],
@@ -132,7 +198,7 @@ class DocumentExporter:
             spaceAfter=6,
             fontName='Helvetica',
         )
-        
+
         meta_style = ParagraphStyle(
             'MetaStyle',
             parent=styles['Normal'],
@@ -270,15 +336,15 @@ class DocumentExporter:
         try:
             # Primero exportar a DOCX
             docx_path = self.export_to_docx(document, output_dir)
-            
+
             # Convertir a PDF usando docx2pdf
             from docx2pdf import convert
             pdf_path = docx_path.with_suffix('.pdf')
             convert(str(docx_path), str(pdf_path))
-            
+
             logger.info(f"Exportado PDF (vía DOCX): {pdf_path}")
             return pdf_path
-            
+
         except ImportError:
             raise ImportError(
                 "Para exportar a PDF necesitas instalar:\n"
@@ -396,8 +462,222 @@ class DocumentExporter:
         logger.info(f"Exportado DOCX: {output_path}")
         return output_path
 
+    # =========================================================================
+    # LaTeX: helpers de escape y de conversión de tablas HTML
+    # =========================================================================
+
+    @staticmethod
+    def _clean_math_spacing(math_text: str) -> str:
+        """
+        MinerU suele emitir fórmulas con espacios sobrantes, p. ej.
+        '$P _ { 1 }$' en vez de '$P_{1}$'. Esto las normaliza sin tocar
+        el contenido matemático en sí.
+        """
+        inner = math_text[1:-1]
+        inner = re.sub(r'\s*_\s*\{\s*', '_{', inner)
+        inner = re.sub(r'\s*\^\s*\{\s*', '^{', inner)
+        inner = re.sub(r'\s*\}\s*', '}', inner)
+        inner = re.sub(r'\s+', ' ', inner).strip()
+        return f"${inner}$"
+
+    @classmethod
+    def _escape_latex(cls, text: str) -> str:
+        """
+        Escapa caracteres especiales de LaTeX (& % $ # _ { } ~ ^ \\) en texto
+        plano, preservando (y limpiando el espaciado de) los fragmentos
+        matemáticos $...$ tal cual, sin escaparlos.
+        """
+        if not text:
+            return text
+
+        def _escape_plain(chunk: str) -> str:
+            return _LATEX_ESCAPE_RE.sub(lambda m: _LATEX_ESCAPE_MAP[m.group(0)], chunk)
+
+        parts = []
+        last_end = 0
+        for match in _MATH_SPAN_RE.finditer(text):
+            parts.append(_escape_plain(text[last_end:match.start()]))
+            parts.append(cls._clean_math_spacing(match.group(0)))
+            last_end = match.end()
+        parts.append(_escape_plain(text[last_end:]))
+        return "".join(parts)
+
+    @classmethod
+    def _rows_to_latex_table(cls, rows: List[List[str]]) -> str:
+        """
+        Construye una tabla LaTeX a partir de una lista de filas ya parseadas.
+
+        Usa 'longtable' en vez de 'table[H]' + 'tabularx'. El entorno
+        'table' es un *float*: aunque se use la opción [H] del paquete
+        'float' para pedirle que se quede "aquí", sigue siendo una unidad
+        indivisible que debe caber completa en el espacio libre de la
+        página. Si la tabla es más alta que ese espacio, LaTeX no logra
+        colocarla y la va empujando hacia adelante; con varias tablas
+        seguidas (algo típico en documentos convertidos desde MinerU) el
+        cupo de floats sin resolver se agota y todas terminan apareciendo
+        juntas al final del documento, en vez de donde corresponden.
+
+        'longtable' no es un float: es una tabla que fluye igual que un
+        párrafo normal, exactamente en el punto del documento donde se
+        escribe. Si no cabe en lo que resta de la página actual, se corta
+        sola justo en el borde de página y continúa automáticamente en la
+        siguiente, repitiendo el encabezado (\\endfirsthead/\\endhead) y
+        mostrando un aviso de continuación (\\endfoot/\\endlastfoot).
+        """
+        n_cols = max(len(r) for r in rows)
+        norm_rows = [r + [""] * (n_cols - len(r)) for r in rows]
+
+        # Ancho de columna calculado por el propio LaTeX (\dimexpr): reparte
+        # \textwidth entre todas las columnas, descontando el padding interno
+        # (\tabcolsep, a ambos lados de cada columna) para que la tabla nunca
+        # se salga de la caja de texto. Cada columna es 'p{...}' con wrap
+        # automático (en vez de 'l', que no ajusta y desborda con celdas largas).
+        col_width = f"\\dimexpr(\\textwidth-{2 * n_cols}\\tabcolsep)/{n_cols}\\relax"
+        col_spec = (">{\\raggedright\\arraybackslash}p{" + col_width + "}") * n_cols
+
+        header_cells = [cls._escape_latex(cell) for cell in norm_rows[0]]
+        header_line = " & ".join(header_cells) + " \\\\"
+
+        lines = []
+        lines.append(f"\\begin{{longtable}}[c]{{{col_spec}}}")
+        # --- Encabezado de la primera página de la tabla ---
+        lines.append("\\toprule")
+        lines.append(header_line)
+        lines.append("\\midrule")
+        lines.append("\\endfirsthead")
+        # --- Encabezado repetido en cada página siguiente, si la tabla se corta ---
+        lines.append(
+            f"\\multicolumn{{{n_cols}}}{{l}}{{\\small\\itshape (continúa de la página anterior)}} \\\\"
+        )
+        lines.append("\\toprule")
+        lines.append(header_line)
+        lines.append("\\midrule")
+        lines.append("\\endhead")
+        # --- Pie que aparece al cortarse la tabla (todas las páginas salvo la última) ---
+        lines.append("\\midrule")
+        lines.append(
+            f"\\multicolumn{{{n_cols}}}{{r}}{{\\small\\itshape (continúa en la página siguiente)}} \\\\"
+        )
+        lines.append("\\endfoot")
+        # --- Pie de la última página de la tabla ---
+        lines.append("\\bottomrule")
+        lines.append("\\endlastfoot")
+        for row in norm_rows[1:]:
+            cells = [cls._escape_latex(cell) for cell in row]
+            lines.append(" & ".join(cells) + " \\\\")
+        lines.append("\\end{longtable}")
+        return "\n".join(lines)
+
+    @classmethod
+    def _html_table_to_latex(cls, html_content: str) -> str:
+        """Convierte una tabla HTML (formato típico de MinerU) a longtable+booktabs."""
+        parser = _LatexHTMLTableParser()
+        try:
+            parser.feed(html_content)
+            parser.close()
+        except Exception:
+            logger.warning("No se pudo parsear una tabla HTML; se exporta como texto plano")
+            return cls._escape_latex(re.sub(r"<[^>]+>", " ", html_content))
+
+        rows = [row for row in parser.rows if any(cell.strip() for cell in row)]
+        if not rows:
+            return cls._escape_latex(re.sub(r"<[^>]+>", " ", html_content))
+
+        return cls._rows_to_latex_table(rows)
+
+    @classmethod
+    def _markdown_table_to_latex(cls, content: str) -> str:
+        """
+        Convierte una tabla en formato markdown (líneas con '|') a longtable+booktabs.
+
+        A veces MinerU/la traducción devuelven la tabla sin saltos de línea
+        (todo en un único párrafo, ej: "a | b | | c | d | | e | f |"). En ese
+        caso se reconstruyen las filas a partir del patrón '| |', que marca
+        el borde entre el final de una fila ("...|") y el inicio de la
+        siguiente ("|...").
+        """
+        normalized = content.strip()
+        if "\n" not in normalized:
+            normalized = _TABLE_ROW_BOUNDARY_RE.sub("|\n|", normalized)
+
+        rows: List[List[str]] = []
+        for line in normalized.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            # Línea separadora markdown típica: |---|---|---| o | :--- | ---: |
+            if set(line.replace("|", "").strip()) <= {"-", ":", " "}:
+                continue
+            cells = [cell.strip() for cell in line.strip("|").split("|")]
+            if any(cell for cell in cells):
+                rows.append(cells)
+
+        # Filtra filas separadoras que usan raya larga "—" en vez de "-"
+        # (MinerU/la traducción a veces la sustituye), p. ej. "— | — | —".
+        def _is_separator_row(row: List[str]) -> bool:
+            return all(set(cell) <= {"-", "—", ":", " "} for cell in row if cell) and any(row)
+
+        rows = [row for row in rows if not _is_separator_row(row)]
+
+        if not rows:
+            return cls._escape_latex(content)
+
+        return cls._rows_to_latex_table(rows)
+
+    @classmethod
+    def _render_latex_layout_element(cls, element: dict, original_only: bool = False) -> str:
+        """Renderiza un elemento estructurado (de layout_elements) a LaTeX válido."""
+        element_type = element.get("type", "paragraph")
+        content = (
+            element.get("content", "")
+            if original_only
+            else element.get("translated_content") or element.get("content", "")
+        )
+        if not content.strip():
+            return ""
+
+        if element_type == "section_title":
+            # Sin numerar: el texto traducido ya trae su propia numeración
+            # (p. ej. "1 Introducción"), así que \section normal duplicaría
+            # el número. \section* no numera ni la añade al índice.
+            return f"\\section*{{{cls._escape_latex(content)}}}"
+
+        if element_type == "table":
+            if "<table" in content.lower():
+                return cls._html_table_to_latex(content)
+            if "|" in content:
+                return cls._markdown_table_to_latex(content)
+            # Sin '|' ni '<table': no se reconoce estructura, se escapa como texto.
+            return cls._escape_latex(content)
+
+        if element_type == "equation":
+            inner = content.strip()
+            if inner.startswith("$") and inner.endswith("$"):
+                return cls._clean_math_spacing(inner)
+            return f"\\[{inner}\\]"
+
+        if element_type == "figure":
+            return f"% [Figura preservada]\n{cls._escape_latex(content)}"
+
+        # reference / paragraph / cualquier otro tipo
+        return cls._escape_latex(content)
+
+    # =========================================================================
+    # LaTeX: exportador principal
+    # =========================================================================
+
     def export_to_latex(self, document: Document, output_dir: Optional[Path] = None, original_only: bool = False) -> Path:
-        """Exporta la traducción preservando formato LaTeX cuando corresponde."""
+        """
+        Exporta la traducción preservando formato LaTeX.
+
+        - Si el documento tiene `layout_elements` (extraído por MinerU),
+          renderiza cada elemento según su tipo: las tablas HTML se
+          convierten a `longtable`/`booktabs` reales (fluyen en el texto y
+          se cortan solas entre páginas) y todo el texto se escapa
+          correctamente, preservando las fórmulas matemáticas.
+        - Si no hay `layout_elements`, cae al camino clásico basado en
+          `document.sections`, también con escape de caracteres especiales.
+        """
         output_dir = output_dir or self.export_dir
         filename = self._generate_filename(document, suffix="traducido", ext="tex")
         output_path = output_dir / filename
@@ -414,26 +694,49 @@ class DocumentExporter:
         lines.append("\\usepackage{amsmath,amssymb}")
         lines.append("\\usepackage{graphicx}")
         lines.append("\\usepackage{hyperref}")
+        lines.append("\\usepackage{array}")      # habilita columnas p{} con ancho fijo y alineación custom (>{...})
+        lines.append("\\usepackage{longtable}")  # tablas que FLUYEN en el texto (no son floats) y cruzan de página solas
+        lines.append("\\usepackage{booktabs}")   # \\toprule/\\midrule/\\bottomrule
         lines.append("")
-        lines.append("\\title{" + Path(document.filename).stem + "}")
+        lines.append("\\title{" + self._escape_latex(Path(document.filename).stem) + "}")
         lines.append("\\author{Traducción automática}")
         lines.append("\\date{\\today}")
         lines.append("")
         lines.append("\\begin{document}")
         lines.append("\\maketitle")
+        lines.append("\\clearpage")  # el contenido empieza en una página nueva, tras la portada
         lines.append("")
 
+        # --- Camino "estructurado": usa layout_elements de MinerU si existen ---
+        layout_elements = document.metadata.get("layout_elements", [])
+        if layout_elements:
+            for element in layout_elements:
+                rendered = self._render_latex_layout_element(element, original_only=original_only)
+                if rendered:
+                    lines.append(rendered)
+                    lines.append("")
+            lines.append("\\end{document}")
+            with open(output_path, 'w', encoding='utf-8') as f:
+                f.write("\n".join(lines))
+            logger.info(f"Exportado LaTeX estructurado: {output_path}")
+            return output_path
+
+        # --- Camino "clásico": sin layout_elements, usa document.sections ---
+        # Nota: se usan las variantes sin numerar (\section*, \subsection*)
+        # porque el texto traducido de section.title ya suele traer su
+        # propia numeración (p. ej. "1 Introducción"); si dejáramos que
+        # LaTeX numerara también, saldría duplicado ("2. 1 Introducción").
         section_env_map = {
             'abstract': 'abstract',
-            'introduction': 'section',
-            'methodology': 'section',
-            'results': 'section',
-            'discussion': 'section',
-            'conclusions': 'section',
-            'references': 'section',
-            'acknowledgments': 'section',
-            'appendix': 'section',
-            'other': 'subsection',
+            'introduction': 'section*',
+            'methodology': 'section*',
+            'results': 'section*',
+            'discussion': 'section*',
+            'conclusions': 'section*',
+            'references': 'section*',
+            'acknowledgments': 'section*',
+            'appendix': 'section*',
+            'other': 'subsection*',
             'title': 'title',
         }
 
@@ -447,18 +750,21 @@ class DocumentExporter:
                 continue
 
             stype = section.section_type.value
-            env = section_env_map.get(stype, 'section')
+            env = section_env_map.get(stype, 'section*')
 
             if stype == 'title':
                 continue  # Ya incluido en \title
 
+            escaped_text = self._escape_latex(text)
+
             if stype == 'abstract':
                 lines.append("\\begin{abstract}")
-                lines.append(text)
+                lines.append(escaped_text)
                 lines.append("\\end{abstract}")
             else:
-                lines.append(f"\\{env}{{{section.title or stype.capitalize()}}}")
-                lines.append(text)
+                title = self._escape_latex(section.title or stype.capitalize())
+                lines.append(f"\\{env}{{{title}}}")
+                lines.append(escaped_text)
             lines.append("")
 
         lines.append("\\end{document}")
@@ -486,33 +792,33 @@ class DocumentExporter:
             return self.export_to_txt(document, output_dir)
 
     def export_all_formats(
-        self, 
-        document: Document, 
+        self,
+        document: Document,
         output_dir: Optional[Path] = None,
         formats: List[str] = ["txt", "docx", "pdf"],
         original_only: bool = False,
     ) -> List[Path]:
         """
         Exporta el documento en múltiples formatos a la vez.
-        
+
         Args:
             document: Documento a exportar
             output_dir: Directorio de salida
             formats: Lista de formatos a exportar: "txt", "docx", "pdf", "latex"
-        
+
         Returns:
             Lista de rutas de los archivos exportados
         """
         output_dir = output_dir or self.export_dir
         exported = []
-        
+
         format_map = {
             "txt": self.export_to_txt,
             "docx": self.export_to_docx,
             "pdf": self.export_to_pdf,
             "latex": self.export_to_latex,
         }
-        
+
         for fmt in formats:
             fmt = fmt.lower().strip()
             if fmt in format_map:
@@ -523,7 +829,7 @@ class DocumentExporter:
                     logger.error(f"Error exportando a {fmt}: {e}")
             else:
                 logger.warning(f"Formato no soportado: {fmt}")
-        
+
         return exported
 
     def create_zip_bundle(self, exported_paths: List[Path], zip_name: Optional[str] = None) -> Path:
