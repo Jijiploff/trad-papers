@@ -111,7 +111,14 @@ class DeepLTranslator(BaseTranslator):
 
         except Exception as e:
             error_str = str(e).lower()
-            if "429" in error_str or "too many requests" in error_str or "quota" in error_str:
+            if (
+                "429" in error_str
+                or "456" in error_str
+                or "too many requests" in error_str
+                or "quota" in error_str
+                or "quota exceeded" in error_str
+                or "character_limit" in error_str
+            ):
                 raise RateLimitError(f"Rate limit o cuota DeepL excedida: {e}")
             elif "401" in error_str or "403" in error_str or "unauthorized" in error_str:
                 raise AuthenticationError(f"Autenticación DeepL fallida: {e}")

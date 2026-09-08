@@ -16,9 +16,11 @@ from src.core.models import (
     TranslationProvider,
 )
 from src.processors import ProcessorFactory
+from src.processors.format_agent import FormatAgent, FormatAgentConfig
 from src.translators import TranslatorFactory
 from src.translators.base import BaseTranslator
 from src.utils.chunker import chunk_document_sections, ChunkingConfig
+from src.utils.chunker import estimate_tokens
 from src.utils.cache import TranslationCache
 from src.utils.logger import get_logger
 
@@ -100,21 +102,138 @@ class TranslationPipeline:
             _report(TranslationStatus.LOADING, 0.05)
             document.status = TranslationStatus.LOADING
 
-            processor = ProcessorFactory.get_processor(document.file_type)
-            document = processor.process(document)
+            if document.file_type.value == "pdf" and not document.metadata.get("preprocessed"):
+                document = FormatAgent(
+                    FormatAgentConfig(mode="local", require_mineru=True)
+                ).process(document)
+            elif document.file_type.value != "pdf":
+                processor = ProcessorFactory.get_processor(document.file_type)
+                document = processor.process(document)
             document.status = TranslationStatus.LOADED
             _report(TranslationStatus.LOADED, 0.1)
 
             # 2. Verificar caché
             if self.cache:
                 cached = self.cache.get(document.content_hash, self.translator.get_provider_name())
-                if cached:
+                cached_layout = (cached or {}).get("metadata", {}).get("layout_elements") or []
+                current_layout = document.metadata.get("layout_elements") or []
+                cache_has_structured_translation = any(
+                    element.get("translatable") and element.get("translated_content")
+                    for element in cached_layout
+                )
+                if cached and (not current_layout or cache_has_structured_translation):
                     logger.info(f"Usando caché para: {filename}")
                     document = self.cache.restore_to_document(document, cached)
                     _report(TranslationStatus.CACHED, 1.0)
                     return document
+                if cached and current_layout and not cache_has_structured_translation:
+                    logger.info(
+                        "Caché ignorada para %s: no contiene traducción estructurada de MinerU",
+                        filename,
+                    )
 
-            # 3. Chunking
+            # 3. Traducción estructurada para PDFs extraídos por MinerU.
+            # Solo se envían elementos marcados como traducibles; el exportador
+            # vuelve a colocarlos en el orden original junto a tablas, figuras,
+            # ecuaciones y referencias intactas.
+            layout_elements = document.metadata.get("layout_elements", [])
+            if layout_elements:
+                _report(TranslationStatus.TRANSLATING, 0.2, total_chunks=len(layout_elements))
+                document.status = TranslationStatus.TRANSLATING
+                translatable = [element for element in layout_elements if element.get("translatable")]
+                completed_elements = 0
+                max_batch_elements = 20
+                max_batch_tokens = 2800
+                batches = []
+                current_batch = []
+                current_tokens = 0
+                for element in translatable:
+                    element_tokens = estimate_tokens(element.get("content", "")) + 12
+                    if current_batch and (
+                        len(current_batch) >= max_batch_elements
+                        or current_tokens + element_tokens > max_batch_tokens
+                    ):
+                        batches.append(current_batch)
+                        current_batch = []
+                        current_tokens = 0
+                    current_batch.append(element)
+                    current_tokens += element_tokens
+                if current_batch:
+                    batches.append(current_batch)
+
+                for batch in batches:
+                    payload_parts = []
+                    batch_metadata = []
+                    for batch_index, element in enumerate(batch):
+                        protected_text, citation_placeholders = self._protect_citations(element["content"])
+                        protected_text, layout_placeholders = self._protect_layout(
+                            protected_text, element.get("type", "paragraph")
+                        )
+                        marker = f"<<<ELEMENT_{batch_index}>>>"
+                        payload_parts.append(f"{marker}\n{protected_text}")
+                        batch_metadata.append((marker, citation_placeholders, layout_placeholders))
+                    try:
+                        translated_payload = self.translator.translate_with_retry(
+                            "\n\n".join(payload_parts),
+                            source_lang=self.source_lang,
+                            target_lang=self.target_lang,
+                        )
+                        translations = self._split_structured_translation(translated_payload, batch_metadata)
+                        for element, translated, (_, citation_placeholders, layout_placeholders) in zip(
+                            batch, translations, batch_metadata
+                        ):
+                            translated = self._restore_layout(translated, layout_placeholders)
+                            element["translated_content"] = self._restore_citations(translated, citation_placeholders)
+                            element["translation_status"] = "translated"
+                    except Exception as exc:
+                        logger.error("Error traduciendo lote estructurado: %s", exc)
+                        for element in batch:
+                            element["translated_content"] = element["content"]
+                            element["translation_status"] = "error"
+                    completed_elements += len(batch)
+                    _report(
+                        TranslationStatus.TRANSLATING,
+                        min(0.95, 0.2 + 0.75 * completed_elements / max(1, len(translatable))),
+                        current_chunk=completed_elements,
+                        total_chunks=len(translatable),
+                    )
+
+                error_elements = sum(
+                    1 for element in translatable
+                    if element.get("translation_status") == "error"
+                )
+                self._apply_layout_to_sections(document)
+                document.provider_used = self._provider_enum(self.translator.get_provider_name())
+                document.translated_tokens = document.estimated_tokens
+
+                if translatable and error_elements == len(translatable):
+                    error_msg = (
+                        "Gemini no pudo traducir ningún elemento estructurado. "
+                        "Revisa la API key, el modelo y la cuota."
+                    )
+                    document.status = TranslationStatus.ERROR
+                    document.error_message = error_msg
+                    document.progress = 0.95
+                    _report(TranslationStatus.ERROR, document.progress, error_message=error_msg)
+                    return document
+
+                if self.cache:
+                    try:
+                        self.cache.put(document, self.translator.get_provider_name())
+                    except Exception as exc:
+                        logger.warning("No se pudo guardar en caché: %s", exc)
+
+                document.status = TranslationStatus.COMPLETED
+                document.progress = 1.0
+                document.completed_at = datetime.now()
+                if error_elements:
+                    document.error_message = (
+                        f"⚠️ {error_elements}/{len(translatable)} elementos no se pudieron traducir."
+                    )
+                _report(TranslationStatus.COMPLETED, 1.0)
+                return document
+
+            # 4. Chunking tradicional para formatos sin estructura MinerU.
             _report(TranslationStatus.CHUNKING, 0.15)
             document.status = TranslationStatus.CHUNKING
             document.chunks = chunk_document_sections(document.sections, self.chunking_config)
@@ -137,7 +256,6 @@ class TranslationPipeline:
             completed_chunks = 0
 
             def _translate_chunk(chunk: TranslationChunk) -> TranslationChunk:
-                nonlocal completed_chunks
                 try:
                     translated = self.translator.translate_with_retry(
                         chunk.text,
@@ -150,21 +268,10 @@ class TranslationPipeline:
                     logger.error(f"Error traduciendo chunk {chunk.chunk_id}: {e}")
                     chunk.status = TranslationStatus.ERROR
                     chunk.translated_text = f"[ERROR DE TRADUCCIÓN: {str(e)}]\n\n{chunk.text}"
-
-                completed_chunks += 1
-                base_progress = 0.2
-                translation_range = 0.75
-                chunk_progress = completed_chunks / total_chunks
-                overall = base_progress + (translation_range * chunk_progress)
-                _report(
-                    TranslationStatus.TRANSLATING,
-                    min(0.95, overall),
-                    current_chunk=completed_chunks,
-                    total_chunks=total_chunks,
-                )
                 return chunk
 
-            # Ejecutar en paralelo
+            # Ejecutar chunks en paralelo, pero reportar progreso solo en este
+            # hilo: Streamlit no admite actualizar widgets desde workers.
             with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
                 futures = [executor.submit(_translate_chunk, chunk) for chunk in document.chunks]
                 for future in as_completed(futures):
@@ -172,6 +279,14 @@ class TranslationPipeline:
                         future.result()
                     except Exception as e:
                         logger.error(f"Error en futuro de traducción: {e}")
+                    completed_chunks += 1
+                    overall = 0.2 + (0.75 * completed_chunks / total_chunks)
+                    _report(
+                        TranslationStatus.TRANSLATING,
+                        min(0.95, overall),
+                        current_chunk=completed_chunks,
+                        total_chunks=total_chunks,
+                    )
 
             # 4.1 Verificar cuántos chunks realmente fallaron. Antes esto no se
             #     comprobaba y el documento se marcaba como COMPLETADO (y se
@@ -248,6 +363,104 @@ class TranslationPipeline:
             _report(TranslationStatus.ERROR, 0.0, error_message=str(e))
             raise
 
+    @staticmethod
+    def _protect_citations(text: str) -> tuple[str, Dict[str, str]]:
+        import re
+
+        patterns = [
+            r"\[[0-9][0-9,;\-–\s]*\]",
+            r"\([A-Z][^()]{0,80}?\b\d{4}[a-z]?\)",
+            r"\\cite[a-zA-Z]*\{[^}]+\}",
+            r"\\(?:ref|eqref|label)\{[^}]+\}",
+        ]
+        placeholders: Dict[str, str] = {}
+        counter = 0
+        combined = re.compile("|".join(f"(?:{pattern})" for pattern in patterns))
+
+        def replace(match):
+            nonlocal counter
+            token = f"__CITATION_{counter}__"
+            placeholders[token] = match.group(0)
+            counter += 1
+            return token
+
+        return combined.sub(replace, text), placeholders
+
+    @staticmethod
+    def _restore_citations(text: str, placeholders: Dict[str, str]) -> str:
+        for token, original in placeholders.items():
+            text = text.replace(token, original)
+        return text
+
+    @staticmethod
+    def _protect_layout(text: str, element_type: str) -> tuple[str, Dict[str, str]]:
+        """Protege sintaxis Markdown que define el formato, no el contenido."""
+        if element_type != "table":
+            return text, {}
+        placeholders = {
+            "__TABLE_NEWLINE__": "\n",
+            "__TABLE_PIPE__": "|",
+        }
+        protected = text.replace("|", "__TABLE_PIPE__").replace("\n", "__TABLE_NEWLINE__")
+        return protected, placeholders
+
+    @staticmethod
+    def _restore_layout(text: str, placeholders: Dict[str, str]) -> str:
+        for token, original in placeholders.items():
+            text = text.replace(token, original)
+        return text
+
+    @staticmethod
+    def _split_structured_translation(text: str, metadata: list) -> List[str]:
+        """Recupera cada traducción usando marcadores que no forman parte del formato."""
+        import re
+
+        positions = []
+        for marker, _, _ in metadata:
+            match = re.search(re.escape(marker), text)
+            if not match:
+                raise ValueError(f"Gemini no conservó el marcador {marker}")
+            positions.append(match)
+        translations = []
+        for index, match in enumerate(positions):
+            start = match.end()
+            end = positions[index + 1].start() if index + 1 < len(positions) else len(text)
+            content = text[start:end].strip()
+            if not content:
+                raise ValueError("Gemini devolvió un elemento vacío")
+            translations.append(content)
+        return translations
+
+    @staticmethod
+    def _provider_enum(provider_name: str) -> Optional[TranslationProvider]:
+        try:
+            return TranslationProvider(provider_name.replace("fallback->", ""))
+        except ValueError:
+            return TranslationProvider.GEMINI
+
+    @staticmethod
+    def _apply_layout_to_sections(document: Document) -> None:
+        """Copia las traducciones estructuradas a las secciones de previsualización."""
+        elements = document.metadata.get("layout_elements") or []
+        if not elements:
+            return
+        replacements = []
+        for element in elements:
+            original = (element.get("content") or "").strip()
+            if not original:
+                continue
+            translated = original
+            if element.get("translatable"):
+                translated = (element.get("translated_content") or original).strip() or original
+            replacements.append((original, translated))
+        replacements.sort(key=lambda item: len(item[0]), reverse=True)
+        for section in document.sections:
+            text = section.original_text
+            for original, translated in replacements:
+                if original and original in text:
+                    text = text.replace(original, translated)
+            section.translated_text = text
+
     def _assemble_translations(self, document: Document) -> None:
         """
         Ensambla los chunks traducidos de vuelta en sus secciones correspondientes.
@@ -312,7 +525,11 @@ class TranslationPipeline:
         global_progress_callback: Optional[Callable[[float, int, int], None]] = None,
     ) -> List[Document]:
         """
-        Procesa múltiples documentos en paralelo.
+        Procesa documentos uno tras otro en el hilo del llamador.
+
+        Streamlit no puede actualizar la interfaz desde un ThreadPoolExecutor;
+        además Gemini tiene un RPM bajo, así que traducir varios PDFs a la
+        vez suele agotar la cuota sin ganar tiempo.
 
         Args:
             documents: Lista de documentos a procesar
@@ -323,31 +540,18 @@ class TranslationPipeline:
             Lista de documentos procesados
         """
         total = len(documents)
-        completed = 0
         results: List[Document] = []
 
-        def _process_single(doc: Document) -> Document:
-            nonlocal completed
+        # Los documentos se procesan en este mismo hilo. Traducir cada PDF en
+        # un ThreadPoolExecutor hacía que Streamlit abortara al actualizar la
+        # UI (Missing ScriptRunContext) antes de enviar texto a Gemini.
+        for index, doc in enumerate(documents, start=1):
             try:
-                result = self.process_document(doc, doc_progress_callback)
-                return result
+                results.append(self.process_document(doc, doc_progress_callback))
             except Exception as e:
                 logger.error(f"Falló documento {doc.filename}: {e}")
-                return doc
-            finally:
-                completed += 1
-                if global_progress_callback:
-                    global_progress_callback(completed / total, completed, total)
-
-        # Usar workers limitados para no saturar
-        doc_workers = max(1, min(self.max_workers, total))
-
-        with ThreadPoolExecutor(max_workers=doc_workers) as executor:
-            futures = [executor.submit(_process_single, doc) for doc in documents]
-            for future in as_completed(futures):
-                try:
-                    results.append(future.result())
-                except Exception as e:
-                    logger.error(f"Error en futuro de documento: {e}")
+                results.append(doc)
+            if global_progress_callback:
+                global_progress_callback(index / total, index, total)
 
         return results

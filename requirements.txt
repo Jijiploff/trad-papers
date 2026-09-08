@@ -15,12 +15,21 @@ PyPDF2>=3.0.0
 # DOCX
 python-docx>=1.1.0
 
+# PDF generado desde la traducción
+reportlab>=4.0.0
+
 # LaTeX
 # (no requiere paquetes adicionales para parsing básico)
 
 # --- Proveedores de traducción ---
-# Google Gemini (GRATIS - 1M tokens/día) - RECOMENDADO
-google-generativeai>=0.8.0
+# Google Gemini SDK (GRATIS - 1M tokens/día) - RECOMENDADO
+google-genai>=1.0.0
+
+# MinerU Open API (extracción Markdown ligera; Flash no requiere token)
+mineru-open-api>=0.5.9
+
+# LlamaParse / LlamaCloud (extracción Markdown en la nube; requiere api_key en config.yaml)
+llama-cloud>=0.1.0
 
 # OpenAI
 openai>=1.12.0,<2.0.0

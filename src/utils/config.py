@@ -28,6 +28,21 @@ DEFAULT_CONFIG = {
         "source_lang": "EN",
         "target_lang": "ES",
     },
+    "mineru": {
+        "timeout_per_chunk_seconds": 600,
+        "retries": 3,
+        "pages_per_chunk": 20,
+        "max_pages": 20,
+        "max_file_size_mb": 10,
+        "require_mineru": True,
+    },
+    "llama": {
+        "api_key": "",
+        "tier": "cost_effective",
+        "version": "latest",
+        "enabled": True,
+        "timeout_seconds": 600,
+    },
     "providers": {
         "openai": {
             "api_key": "",
@@ -42,7 +57,7 @@ DEFAULT_CONFIG = {
         },
         "gemini": {
             "api_key": "",
-            "model": "gemini-1.5-flash",
+            "model": "gemini-3.1-flash-lite",
             "temperature": 0.2,
         },
     },
@@ -85,6 +100,7 @@ def load_config(config_path: Optional[str] = None) -> Dict[str, Any]:
         "OPENAI_API_KEY": ("providers", "openai", "api_key"),
         "DEEPL_API_KEY": ("providers", "deepl", "api_key"),
         "GEMINI_API_KEY": ("providers", "gemini", "api_key"),
+        "LLAMA_CLOUD_API_KEY": ("llama", "api_key"),
     }
     for env_var, keys in env_mappings.items():
         value = os.environ.get(env_var)

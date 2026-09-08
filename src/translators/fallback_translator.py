@@ -35,6 +35,9 @@ _NON_RETRYABLE_HINTS = ("404", "not found", "no existe", "no está disponible")
 # Esto NO se arregla esperando unos segundos y reintentando: hay que esperar
 # al próximo ciclo de facturación (o cambiar de plan).
 _PERMANENT_QUOTA_HINTS = (
+    "456",
+    "quota exceeded",
+    "character_limit",
     "billing period",
     "periodo de facturación",
     "período de facturación",

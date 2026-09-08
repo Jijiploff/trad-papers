@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Optional, Dict, Any
 from datetime import datetime
 
-from src.core.models import Document, Section, TranslationStatus, SectionType
+from src.core.models import Document, Section, TranslationStatus, SectionType, TranslationProvider
 from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -114,6 +114,11 @@ class TranslationCache:
             "created_at": datetime.now().isoformat(),
             "estimated_tokens": document.estimated_tokens,
             "sections": sections_data,
+            "metadata": {
+                "layout_elements": document.metadata.get("layout_elements", []),
+                "layout_backend": document.metadata.get("layout_backend", ""),
+                "preprocessed": document.metadata.get("preprocessed", False),
+            },
             "page_count": document.page_count,
         }
 
@@ -161,7 +166,12 @@ class TranslationCache:
         document.estimated_tokens = cache_data.get("estimated_tokens", 0)
         document.translated_tokens = document.estimated_tokens
         document.page_count = cache_data.get("page_count")
-        document.provider_used = cache_data.get("provider")
+        document.metadata.update(cache_data.get("metadata", {}))
+        provider_name = str(cache_data.get("provider") or "").replace("fallback->", "")
+        try:
+            document.provider_used = TranslationProvider(provider_name)
+        except ValueError:
+            document.provider_used = None
         return document
 
     def clear(self) -> None:

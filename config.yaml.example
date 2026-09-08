@@ -41,6 +41,30 @@ translation:
   target_lang: "ES"                # Idioma destino
 
 # =============================================================================
+# Configuración de MinerU (extracción estructurada de PDFs)
+# =============================================================================
+mineru:
+  timeout_per_chunk_seconds: 600  # Timeout por bloque de páginas (10 min)
+  retries: 3                       # Reintentos por bloque antes de fallar
+  pages_per_chunk: 20              # Páginas procesadas por bloque al dividir
+  max_pages: 20                    # Si el PDF supera estas páginas, se divide
+  max_file_size_mb: 10             # Si el PDF supera estos MB, se divide en bloques más pequeños
+  require_mineru: true             # Si falla MinerU, no usar pdfplumber
+
+# =============================================================================
+# Configuración de LlamaParse (LlamaCloud) - alternativa en la nube a MinerU
+# =============================================================================
+# Forma una cola con MinerU: el primer documento se procesa con MinerU, el
+# segundo con LlamaParse, y así sucesivamente. Si uno falla, se usa el otro.
+# Obtén tu API key en: https://cloud.llamaindex.ai/
+llama:
+  api_key: ""                     # Tu API key de LlamaCloud (llx-...), pégala manualmente
+  tier: "cost_effective"          # fast | cost_effective | agentic | agentic_plus
+  version: "latest"               # Versión del tier ('latest')
+  enabled: true                   # Usar LlamaParse en la cola con MinerU
+  timeout_seconds: 600            # Timeout por documento (10 min)
+
+# =============================================================================
 # Proveedores de traducción (orden de prioridad: Gemini -> DeepL -> OpenAI)
 # =============================================================================
 providers:
@@ -50,7 +74,7 @@ providers:
   # Obtén tu API key en: https://aistudio.google.com/apikey
   gemini:
     api_key: ""                     # Tu API key de Google AI Studio
-    model: "gemini-1.5-flash"       # gemini-1.5-flash (gratis), gemini-1.5-pro
+    model: "gemini-3.1-flash-lite"  # Modelo ligero recomendado
     temperature: 0.2
 
   # --- DeepL API (SECUNDARIO - Fallback automático) ---

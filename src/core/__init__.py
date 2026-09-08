@@ -10,7 +10,6 @@ from src.core.models import (
     TranslationProvider,
     SectionType,
 )
-from src.core.pipeline import TranslationPipeline, TranslationProgress
 
 __all__ = [
     "Document",
@@ -23,3 +22,14 @@ __all__ = [
     "TranslationPipeline",
     "TranslationProgress",
 ]
+
+
+def __getattr__(name):
+    """Carga el pipeline bajo demanda para evitar un ciclo de imports."""
+    if name in {"TranslationPipeline", "TranslationProgress"}:
+        from src.core.pipeline import TranslationPipeline, TranslationProgress
+        return {
+            "TranslationPipeline": TranslationPipeline,
+            "TranslationProgress": TranslationProgress,
+        }[name]
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

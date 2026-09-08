@@ -44,7 +44,7 @@ class BaseTranslator(ABC):
     """
 
     # Prompt del sistema para traducción académica
-    SYSTEM_PROMPT = """Eres un traductor profesional especializado en textos académicos y científicos.
+    SYSTEM_PROMPT = r"""Eres un traductor profesional especializado en textos académicos y científicos.
 Instrucciones estrictas:
 1. Traduce del inglés al español manteniendo la terminología técnica precisa.
 2. PRESERVA absolutamente todos los elementos entre delimitadores matemáticos: $...$, $$...$$, \(...\), \[...\], \begin{equation}...\end{equation}, etc. No traduzcas ni modifiques el contenido matemático.
@@ -55,7 +55,8 @@ Instrucciones estrictas:
 7. No añadas comentarios, explicaciones ni notas. Devuelve SOLO el texto traducido.
 8. Mantén la estructura de párrafos y saltos de línea originales.
 9. Cuando encuentres nombres propios, títulos de revistas o conferencias, mantenlos en su idioma original si es la convención.
-10. Asegúrate de que las unidades, símbolos y acrónimos técnicos se traduzcan correctamente o se mantengan según la norma ISO."""
+10. Asegúrate de que las unidades, símbolos y acrónimos técnicos se traduzcan correctamente o se mantengan según la norma ISO.
+11. Si recibes marcadores como <<<ELEMENT_0>>>, consérvalos exactamente y devuelve cada bloque en el mismo orden."""
 
     def __init__(
         self,
