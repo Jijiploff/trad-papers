@@ -177,7 +177,7 @@ def main():
     max_file_size_mb = app_cfg.get("max_file_size_mb", 50)
     translation_cfg = config.get("translation", {})
     mineru_cfg = config.get("mineru", {})
-    docling_cfg = config.get("docling", {})
+    llama_cfg = config.get("llama", {})
 
     # =========================================================================
     # Sidebar: Configuración
@@ -226,7 +226,7 @@ def main():
             "⏱️ Timeout por bloque (min)",
             min_value=5,
             max_value=120,
-            value=max(5, mineru_cfg.get("timeout_per_chunk_seconds", 1800) // 60),
+            value=max(5, mineru_cfg.get("timeout_per_chunk_seconds", 600) // 60),
             step=5,
             help="Tiempo máximo de espera por bloque de páginas en MinerU",
         )
@@ -250,26 +250,46 @@ def main():
             help="Número de páginas procesadas en cada bloque enviado a MinerU",
         )
 
+        mineru_max_pages = st.slider(
+            "📑 Máx. páginas sin dividir",
+            min_value=5,
+            max_value=50,
+            value=mineru_cfg.get("max_pages", 20),
+            step=5,
+            help="Si el PDF supera estas páginas, se divide en bloques adaptativos",
+        )
+
+        mineru_max_file_size_mb = st.slider(
+            "💾 Máx. tamaño sin dividir (MB)",
+            min_value=1,
+            max_value=50,
+            value=mineru_cfg.get("max_file_size_mb", 10),
+            step=1,
+            help="Si el PDF supera estos MB, se reducen las páginas por bloque hasta quedar bajo el límite",
+        )
+
         st.divider()
 
-        # Parámetros de Docling
-        st.subheader("🧠 Docling (IBM - local)")
-        docling_enabled = st.checkbox(
-            "✅ Habilitar Docling como fallback tras MinerU",
-            value=docling_cfg.get("enabled", True),
-            help="Si MinerU falla, procesa el PDF con Docling (local, ~300MB modelos descarga inicial)",
+        # Parámetros de LlamaParse
+        st.subheader("🦙 LlamaParse (nube - alternativa a MinerU)")
+        llama_enabled = st.checkbox(
+            "✅ Habilitar LlamaParse en la cola con MinerU",
+            value=llama_cfg.get("enabled", True),
+            help="Los documentos alternan entre MinerU y LlamaParse; si uno "
+                 "falla se usa el otro. Deja tu API key en config.yaml → llama.api_key",
         )
-
-        docling_timeout_min = st.slider(
-            "⏱️ Timeout Docling (min)",
+        llama_timeout_min = st.slider(
+            "⏱️ Timeout LlamaParse (min)",
             min_value=2,
             max_value=60,
-            value=max(2, docling_cfg.get("timeout_seconds", 600) // 60),
+            value=max(2, llama_cfg.get("timeout_seconds", 600) // 60),
             step=2,
-            disabled=not docling_enabled,
-            help="Tiempo máximo por documento al procesar con Docling",
+            disabled=not llama_enabled,
+            help="Tiempo máximo por documento al procesar con LlamaParse",
         )
-        docling_timeout_seconds = docling_timeout_min * 60
+        llama_timeout_seconds = llama_timeout_min * 60
+        llama_tier = llama_cfg.get("tier", "cost_effective")
+        llama_version = llama_cfg.get("version", "latest")
 
         st.divider()
 
@@ -408,9 +428,7 @@ def main():
                     if needs_preprocessing and doc.status == TranslationStatus.PENDING:
                         analysis_status.info(
                             f'🤖 Agente procesador: procesando "{doc.filename}" '
-                            f'(MinerU {mineru_timeout_min}min/{mineru_retries}reint '
-                            f'| Docling {"ON" if docling_enabled else "OFF"} '
-                            f'{docling_timeout_min if docling_enabled else ""}min)'
+                            f'(cola MinerU↔LlamaParse {"ON" if llama_enabled else "OFF"})'
                         )
                         try:
                             doc.status = TranslationStatus.LOADING
@@ -422,11 +440,13 @@ def main():
                                         mineru_retries=mineru_retries,
                                         mineru_timeout_seconds=mineru_timeout_seconds,
                                         mineru_pages_per_chunk=mineru_pages_per_chunk,
-                                        docling_enabled=docling_enabled,
-                                        docling_timeout_seconds=docling_timeout_seconds,
-                                        docling_prefer_over_fallback=docling_cfg.get(
-                                            "prefer_over_pdfplumber", True
-                                        ),
+                                        mineru_max_pages=mineru_max_pages,
+                                        mineru_max_file_size_mb=mineru_max_file_size_mb,
+                                        llama_enabled=llama_enabled,
+                                        llama_api_key=llama_cfg.get("api_key", ""),
+                                        llama_tier=llama_tier,
+                                        llama_version=llama_version,
+                                        llama_timeout_seconds=llama_timeout_seconds,
                                     )
                                 ).process(doc)
                             else:
@@ -436,9 +456,13 @@ def main():
                             doc.metadata["mineru_timeout_used"] = mineru_timeout_seconds
                             doc.metadata["mineru_retries_used"] = mineru_retries
                             doc.metadata["mineru_pages_per_chunk_used"] = mineru_pages_per_chunk
-                            doc.metadata["docling_enabled"] = docling_enabled
-                            if docling_enabled:
-                                doc.metadata["docling_timeout_used"] = docling_timeout_seconds
+                            doc.metadata["mineru_max_pages_used"] = mineru_max_pages
+                            doc.metadata["mineru_max_file_size_mb_used"] = mineru_max_file_size_mb
+                            doc.metadata["llama_enabled"] = llama_enabled
+                            doc.metadata["llama_tier_used"] = llama_tier
+                            doc.metadata["llama_version_used"] = llama_version
+                            if llama_enabled:
+                                doc.metadata["llama_timeout_used"] = llama_timeout_seconds
                             doc.status = TranslationStatus.LOADED
                         except Exception as e:
                             doc.status = TranslationStatus.ERROR
@@ -461,8 +485,8 @@ def main():
                     st.error(
                         f'❌ "{doc.filename}" no pudo procesarse: '
                         f'{doc.error_message or "error desconocido"}. '
-                        "MinerU es obligatorio en esta ruta; no se usará el extractor local. "
-                        "Pulsa Reintentar procesamiento cuando la conexión con MinerU esté disponible."
+                        "MinerU y LlamaParse fallaron; no se usará el extractor local. "
+                        "Pulsa Reintentar procesamiento cuando la conexión esté disponible."
                     )
                     continue
 

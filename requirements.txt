@@ -28,8 +28,8 @@ google-genai>=1.0.0
 # MinerU Open API (extracción Markdown ligera; Flash no requiere token)
 mineru-open-api>=0.5.9
 
-# Docling (IBM) - fallback local estructurado para PDFs (~300MB modelos descarga inicial)
-docling>=1.0.0
+# LlamaParse / LlamaCloud (extracción Markdown en la nube; requiere api_key en config.yaml)
+llama-cloud>=0.1.0
 
 # OpenAI
 openai>=1.12.0,<2.0.0

@@ -64,6 +64,25 @@ class TextNormalizationTests(unittest.TestCase):
         self.assertTrue(elements[4]["translatable"])
         self.assertFalse(elements[5]["translatable"])
 
+    def test_llamaparse_bold_references_heading_detected(self):
+        agent = FormatAgent()
+        text = "## Abstract\n\nSome text.\n\n## **References**\n[1] A. Author, Ref A.\n[2] B. Author, Ref B."
+        body, references = agent._split_references(text)
+        self.assertNotIn("[1]", body)
+        self.assertIn("[1] A. Author, Ref A.", references)
+        self.assertIn("[2] B. Author, Ref B.", references)
+        elements = agent._build_layout_elements(text)
+        refs = [e for e in elements if e["type"] == "reference"]
+        self.assertEqual(len(refs), 2)
+        self.assertTrue(all(not r["translatable"] for r in refs))
+
+    def test_section_title_bold_markers_stripped(self):
+        elements = FormatAgent()._build_layout_elements("## **Introduction**\nHello.\n\n## **Methods**\nStep 1.")
+        titles = [e["type"] for e in elements]
+        self.assertEqual(titles.count("section_title"), 2)
+        cleaned = [e["content"] for e in elements if e["type"] == "section_title"]
+        self.assertEqual(cleaned, ["Introduction", "Methods"])
+
     def test_citations_are_removed_from_translation_payload_and_restored(self):
         source = "Forest carbon increased [1, 2] according to (Smith et al., 2020)."
         protected, placeholders = TranslationPipeline._protect_citations(source)
@@ -147,7 +166,7 @@ class TextNormalizationTests(unittest.TestCase):
 
     def test_format_agent_does_not_fallback_when_mineru_fails(self):
         document = Document("id", "article.pdf", FileType.PDF, 1, b"pdf")
-        agent = FormatAgent(FormatAgentConfig(docling_enabled=False))
+        agent = FormatAgent(FormatAgentConfig())
         with patch.object(agent, "_try_mineru_open_api", return_value=""):
             with self.assertRaises(RuntimeError) as error:
                 agent.process(document)
@@ -157,8 +176,7 @@ class TextNormalizationTests(unittest.TestCase):
         document = Document("id", "article.pdf", FileType.PDF, 1, b"%PDF-1.4\n1 0 obj\n<<>>\nendobj\ntrailer\n<<>>\n%%EOF")
         agent = FormatAgent(FormatAgentConfig(
             mineru_retries=2,
-            mineru_timeout_seconds=1200,
-            docling_enabled=False,
+            mineru_timeout_seconds=600,
         ))
 
         class DummyReader:
@@ -175,7 +193,7 @@ class TextNormalizationTests(unittest.TestCase):
                 fake_run.calls = 0
             fake_run.calls += 1
             if fake_run.calls < 3:
-                raise subprocess.TimeoutExpired(cmd="flash-extract", timeout=1200)
+                raise subprocess.TimeoutExpired(cmd="flash-extract", timeout=600)
             return SimpleNamespace(returncode=0, stdout="# Hola\n\nTexto procesado.", stderr="")
 
         with patch("PyPDF2.PdfReader", return_value=DummyReader()), \
@@ -187,6 +205,84 @@ class TextNormalizationTests(unittest.TestCase):
         self.assertIn("Hola", result)
         self.assertIn("Texto procesado", result)
         self.assertEqual(fake_run.calls, 3)
+
+    def test_mineru_plan_chunks_splits_by_weight_with_few_pages(self):
+        """Un PDF de pocas páginas pero >10MB debe dividirse en bloques más pequeños."""
+        class DummyReader:
+            pages = [object()] * 10
+
+        agent = FormatAgent(FormatAgentConfig(
+            mineru_pages_per_chunk=20,
+            mineru_max_pages=20,
+            mineru_max_file_size_mb=10,
+        ))
+        chunks = agent._plan_chunks(
+            DummyReader(), 25 * 1024 * 1024, 20, 20, 10 * 1024 * 1024
+        )
+        flat = [page for start, end in chunks for page in range(start, end)]
+        self.assertEqual(flat, list(range(0, 10)))
+        self.assertGreater(len(chunks), 1)
+        for start, end in chunks:
+            self.assertGreaterEqual(end - start, 1)
+
+    def test_mineru_plan_chunks_respects_page_limit(self):
+        """Un PDF de 25 páginas, ligero, se parte en bloques de 20 máximo."""
+        class DummyReader:
+            pages = [object()] * 25
+
+        agent = FormatAgent(FormatAgentConfig(
+            mineru_pages_per_chunk=20,
+            mineru_max_pages=20,
+            mineru_max_file_size_mb=10,
+        ))
+        chunks = agent._plan_chunks(DummyReader(), 5 * 1024 * 1024, 20, 20, 10 * 1024 * 1024)
+        self.assertEqual(chunks, [(0, 20), (20, 25)])
+
+    def test_mineru_plan_chunks_single_chunk_when_within_limits(self):
+        """Un PDF dentro de límites no se divide."""
+        class DummyReader:
+            pages = [object()] * 10
+
+        agent = FormatAgent(FormatAgentConfig())
+        chunks = agent._plan_chunks(DummyReader(), 5 * 1024 * 1024, 20, 20, 10 * 1024 * 1024)
+        self.assertEqual(chunks, [(0, 10)])
+
+    def test_llama_skipped_without_api_key(self):
+        """Sin API key de Llama, la cola queda solo con MinerU."""
+        agent = FormatAgent(FormatAgentConfig())
+        self.assertEqual(agent._available_backends(), ["mineru"])
+        self.assertEqual(agent._ordered_backends(), ["mineru"])
+
+    def test_llama_queue_alternates_primary_backend(self):
+        """Con ambos habilitados, el primario alterna por documento."""
+        FormatAgent._backend_turn = 0
+        agent = FormatAgent(FormatAgentConfig(llama_api_key="llx-test"))
+        self.assertEqual(agent._available_backends(), ["mineru", "llamaparse"])
+        self.assertEqual(agent._ordered_backends(), ["mineru", "llamaparse"])
+        self.assertEqual(agent._ordered_backends(), ["llamaparse", "mineru"])
+        self.assertEqual(agent._ordered_backends(), ["mineru", "llamaparse"])
+
+    def test_llama_used_as_fallback_when_mineru_fails(self):
+        """MinerU primario falla; LlamaParse lo rescata."""
+        FormatAgent._backend_turn = 0
+        document = Document("id", "article.pdf", FileType.PDF, 1, b"%PDF-fake")
+        agent = FormatAgent(FormatAgentConfig(llama_api_key="llx-test"))
+        with patch.object(agent, "_try_mineru_open_api", return_value=""), \
+             patch.object(agent, "_try_llama_parse", return_value="# Markdown Llama"):
+            result = agent.process(document)
+        self.assertEqual(result.metadata["layout_backend"], "llamaparse")
+        self.assertIn("Markdown Llama", result.full_original_text)
+
+    def test_mineru_used_as_fallback_when_llama_fails(self):
+        """LlamaParse primario falla; MinerU lo rescata."""
+        FormatAgent._backend_turn = 1
+        document = Document("id", "article.pdf", FileType.PDF, 1, b"%PDF-fake")
+        agent = FormatAgent(FormatAgentConfig(llama_api_key="llx-test"))
+        with patch.object(agent, "_try_mineru_open_api", return_value="# Markdown MinerU"), \
+             patch.object(agent, "_try_llama_parse", return_value=""):
+            result = agent.process(document)
+        self.assertEqual(result.metadata["layout_backend"], "mineru-open-api-flash")
+        self.assertIn("Markdown MinerU", result.full_original_text)
 
 
 if __name__ == "__main__":
